@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d12" />
+    <title>Second Brain</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">🧠</div>
+          <div>
+            <p class="eyebrow">TELEGRAM</p>
+            <h1>Second Brain</h1>
+          </div>
+        </div>
+        <div class="profile" id="profileBadge" aria-label="Профиль">SB</div>
+      </header>
+
+      <section class="hero">
+        <p class="hero-kicker">Вспомни что угодно</p>
+        <h2>Что мы ищем?</h2>
+        <form class="search" id="searchForm" role="search">
+          <span class="search-icon">⌕</span>
+          <input
+            id="searchInput"
+            type="search"
+            autocomplete="off"
+            placeholder="Тот пост про WireGuard…"
+            aria-label="Поиск по сохранённым"
+          />
+          <button type="button" class="search-clear" id="searchClear" aria-label="Очистить">×</button>
+        </form>
+        <div class="search-mode" id="searchMode">Поиск по тексту и категориям</div>
+      </section>
+
+      <section class="overview" aria-labelledby="overviewTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">КОЛЛЕКЦИЯ</p>
+            <h3 id="overviewTitle">Мои сохранённые</h3>
+          </div>
+          <div class="total-pill"><span id="totalCount">0</span> всего</div>
+        </div>
+        <div class="category-grid" id="categoryGrid" aria-live="polite"></div>
+      </section>
+
+      <section class="library" aria-labelledby="libraryTitle">
+        <div class="section-heading library-heading">
+          <div>
+            <p class="eyebrow" id="resultsLabel">ПОСЛЕДНИЕ</p>
+            <h3 id="libraryTitle">Сохранения</h3>
+          </div>
+          <button class="icon-button" id="refreshButton" aria-label="Обновить">↻</button>
+        </div>
+
+        <div class="filter-row" id="filterRow">
+          <button class="filter active" data-filter="all">Все</button>
+          <button class="filter" data-filter="favorites">★ Избранное</button>
+          <button class="filter" data-filter="unread">Непрочитанные</button>
+        </div>
+
+        <div class="items" id="itemsList" aria-live="polite">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card short"></div>
+        </div>
+      </section>
+
+      <footer>
+        <span>Перешли сообщение боту — и оно появится здесь.</span>
+      </footer>
+    </main>
+
+    <div class="toast" id="toast" role="status"></div>
+  </body>
+</html>
