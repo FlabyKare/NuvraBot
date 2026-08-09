@@ -63,7 +63,10 @@ async function api(path, options = {}) {
 
 async function bootstrap() {
   tg?.ready();
-  tg?.expand();
+  const desktopPlatforms = new Set(["tdesktop", "macos", "weba", "webk", "web"]);
+  if (!desktopPlatforms.has((tg?.platform || "").toLowerCase())) {
+    tg?.expand();
+  }
   tg?.setHeaderColor?.("#0b0d12");
   tg?.setBackgroundColor?.("#0b0d12");
 
