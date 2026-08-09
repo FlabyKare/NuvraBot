@@ -39,7 +39,13 @@ def create_app(
             if app_settings.run_bot and app_settings.telegram_bot_token:
                 bot = create_bot(app_settings)
                 dispatcher = create_dispatcher(app_settings, db, ai)
-                await configure_bot(bot, app_settings)
+                try:
+                    await configure_bot(bot, app_settings)
+                except Exception:
+                    logger.exception(
+                        "Unable to configure Telegram commands or Mini App button; "
+                        "API and bot polling will continue"
+                    )
                 tasks.append(asyncio.create_task(dispatcher.start_polling(bot), name="telegram-polling"))
                 tasks.append(
                     asyncio.create_task(

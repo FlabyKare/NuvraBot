@@ -43,7 +43,10 @@ class Settings(BaseSettings):
     @field_validator("public_url")
     @classmethod
     def strip_public_url(cls, value: str) -> str:
-        return value.rstrip("/")
+        normalized = value.strip().rstrip("/")
+        if normalized and "://" not in normalized:
+            normalized = f"https://{normalized.lstrip('/')}"
+        return normalized
 
     @field_validator("database_path", mode="before")
     @classmethod
