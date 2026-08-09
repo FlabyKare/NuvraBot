@@ -67,6 +67,12 @@ TELEGRAM_BOT_TOKEN=токен_от_BotFather
 PUBLIC_URL=https://ваш-публичный-домен.example
 ```
 
+Проверьте токен и установите список команд бота:
+
+```bash
+python scripts/setup_bot.py
+```
+
 `PUBLIC_URL` обязан быть HTTPS-адресом этого же приложения. Без него бот и локальная веб-версия работают, но Telegram не покажет кнопку Mini App.
 
 ### 3. Запустите
