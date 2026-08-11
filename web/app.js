@@ -23,6 +23,7 @@ const state = {
   searchTimer: null,
   itemsLoaded: false,
   requestId: 0,
+  actionDrag: null,
 };
 
 const elements = {
@@ -114,6 +115,14 @@ function bindEvents() {
     loadItems();
   });
   elements.itemsList.addEventListener("click", handleItemAction);
+  elements.itemsList.addEventListener("click", handleVideoAction);
+  elements.itemsList.addEventListener("input", handleVideoSeek);
+  elements.itemsList.addEventListener("wheel", handleActionsWheel, { passive: false });
+  elements.itemsList.addEventListener("pointerdown", beginActionDrag);
+  elements.itemsList.addEventListener("pointermove", moveActionDrag);
+  elements.itemsList.addEventListener("pointerup", endActionDrag);
+  elements.itemsList.addEventListener("pointercancel", endActionDrag);
+  elements.itemsList.addEventListener("keydown", handleActionsKeydown);
 }
 
 async function loadMe() {
@@ -240,7 +249,7 @@ function renderItem(item) {
         ${source ? `<span class="meta-dot"></span><span>${escapeHtml(source)}</span>` : ""}
         ${reminder}
       </div>
-      <div class="item-actions">
+      <div class="item-actions" tabindex="0" aria-label="Действия с сохранением">
         <button class="action-button" data-action="read">${item.read ? "↩ Не прочитано" : "✓ Прочитано"}</button>
         <button class="action-button" data-action="tomorrow">⏰ Завтра</button>
         <button class="action-button" data-action="month">Через месяц</button>
@@ -272,6 +281,12 @@ function renderMediaLauncher(item) {
 }
 
 async function handleItemAction(event) {
+  const actions = event.target.closest(".item-actions");
+  if (actions?.dataset.suppressClick === "true") {
+    event.preventDefault();
+    delete actions.dataset.suppressClick;
+    return;
+  }
   const button = event.target.closest("[data-action]");
   const card = event.target.closest("[data-item-id]");
   if (!button || !card) return;
@@ -317,11 +332,32 @@ async function openMedia(item, card) {
   const slot = card.querySelector("[data-media-slot]");
   if (!slot) return;
   slot.classList.add("loading");
-  const media = await api(`/api/items/${item.id}/media-url`);
+  let media;
+  try {
+    media = await api(`/api/items/${item.id}/media-url`);
+  } finally {
+    slot.classList.remove("loading");
+  }
   const source = escapeAttribute(media.url);
   const title = escapeAttribute(item.title);
   if (item.kind === "video") {
-    slot.innerHTML = `<video class="item-media" controls playsinline preload="metadata" src="${source}" aria-label="${title}"></video>`;
+    slot.innerHTML = `
+      <div class="video-player" data-video-player>
+        <video class="item-video" data-video-action="toggle" playsinline preload="metadata" src="${source}" aria-label="${title}"></video>
+        <span class="video-caption">${escapeHtml(media.file_name || item.title || "Видео")}</span>
+        <button class="video-close" data-video-action="close" aria-label="Свернуть плеер">×</button>
+        <button class="video-big-play" data-video-action="toggle" aria-label="Воспроизвести видео">▶</button>
+        <span class="video-buffering" aria-hidden="true"></span>
+        <div class="video-controls">
+          <button class="video-control" data-video-action="toggle" aria-label="Воспроизвести">▶</button>
+          <span class="video-time" data-video-current>0:00</span>
+          <input class="video-progress" data-video-progress type="range" min="0" max="1000" value="0" aria-label="Позиция видео" />
+          <span class="video-time" data-video-duration>0:00</span>
+          <button class="video-control" data-video-action="mute" aria-label="Выключить звук">🔊</button>
+          <button class="video-control" data-video-action="fullscreen" aria-label="На весь экран">⛶</button>
+        </div>
+      </div>`;
+    setupVideoPlayer(slot.querySelector("[data-video-player]"));
   } else if (item.kind === "audio" || item.kind === "voice") {
     slot.innerHTML = `<audio class="item-audio" controls preload="metadata" src="${source}" aria-label="${title}"></audio>`;
   } else if (item.kind === "photo") {
@@ -329,6 +365,170 @@ async function openMedia(item, card) {
   } else {
     slot.innerHTML = `<a class="media-file" href="${source}" target="_blank" rel="noopener">Открыть ${escapeHtml(media.file_name || "файл")} ↗</a>`;
   }
+}
+
+function setupVideoPlayer(player) {
+  if (!player) return;
+  const video = player.querySelector("video");
+  const progress = player.querySelector("[data-video-progress]");
+  const current = player.querySelector("[data-video-current]");
+  const duration = player.querySelector("[data-video-duration]");
+  const toggleButtons = player.querySelectorAll('[data-video-action="toggle"]');
+  const muteButton = player.querySelector('[data-video-action="mute"]');
+
+  const updatePlaybackState = () => {
+    const playing = !video.paused && !video.ended;
+    player.classList.toggle("playing", playing);
+    toggleButtons.forEach((button) => {
+      if (button === video) return;
+      button.textContent = playing ? "❚❚" : "▶";
+      button.setAttribute("aria-label", playing ? "Поставить на паузу" : "Воспроизвести");
+    });
+  };
+  const updateTimeline = () => {
+    const total = Number.isFinite(video.duration) ? video.duration : 0;
+    const value = total ? Math.round((video.currentTime / total) * 1000) : 0;
+    progress.value = String(value);
+    progress.style.setProperty("--video-progress", `${value / 10}%`);
+    current.textContent = formatDuration(video.currentTime);
+    duration.textContent = formatDuration(total);
+  };
+
+  video.addEventListener("loadedmetadata", () => {
+    player.classList.toggle("portrait", video.videoHeight > video.videoWidth);
+    updateTimeline();
+  });
+  video.addEventListener("timeupdate", updateTimeline);
+  video.addEventListener("durationchange", updateTimeline);
+  video.addEventListener("play", updatePlaybackState);
+  video.addEventListener("pause", updatePlaybackState);
+  video.addEventListener("ended", updatePlaybackState);
+  video.addEventListener("waiting", () => player.classList.add("buffering"));
+  video.addEventListener("playing", () => player.classList.remove("buffering"));
+  video.addEventListener("canplay", () => player.classList.remove("buffering"));
+  video.addEventListener("error", () => {
+    player.classList.remove("buffering");
+    showToast("Не удалось загрузить видео");
+  });
+  video.addEventListener("volumechange", () => {
+    const muted = video.muted || video.volume === 0;
+    muteButton.textContent = muted ? "🔇" : "🔊";
+    muteButton.setAttribute("aria-label", muted ? "Включить звук" : "Выключить звук");
+  });
+}
+
+async function handleVideoAction(event) {
+  const control = event.target.closest("[data-video-action]");
+  if (!control) return;
+  const player = control.closest("[data-video-player]");
+  const card = control.closest("[data-item-id]");
+  const video = player?.querySelector("video");
+  if (!player || !card || !video) return;
+  const item = state.items.find((candidate) => candidate.id === Number(card.dataset.itemId));
+  if (!item) return;
+
+  event.preventDefault();
+  const action = control.dataset.videoAction;
+  if (action === "toggle") {
+    if (video.paused || video.ended) {
+      await video.play().catch(() => showToast("Нажми ещё раз, чтобы запустить видео"));
+    } else {
+      video.pause();
+    }
+  } else if (action === "mute") {
+    video.muted = !video.muted;
+  } else if (action === "fullscreen") {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (player.requestFullscreen) {
+        await player.requestFullscreen();
+      } else if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen();
+      }
+    } catch {
+      showToast("Полноэкранный режим недоступен");
+    }
+  } else if (action === "close") {
+    video.pause();
+    const slot = player.closest("[data-media-slot]");
+    if (slot) slot.outerHTML = renderMediaLauncher(item);
+  }
+}
+
+function handleVideoSeek(event) {
+  const progress = event.target.closest("[data-video-progress]");
+  if (!progress) return;
+  const video = progress.closest("[data-video-player]")?.querySelector("video");
+  if (!video || !Number.isFinite(video.duration)) return;
+  video.currentTime = (Number(progress.value) / 1000) * video.duration;
+}
+
+function handleActionsWheel(event) {
+  const scroller = event.target.closest(".item-actions");
+  if (!scroller || scroller.scrollWidth <= scroller.clientWidth) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  if (!delta) return;
+  const previous = scroller.scrollLeft;
+  const maximum = scroller.scrollWidth - scroller.clientWidth;
+  const next = Math.max(0, Math.min(maximum, previous + delta));
+  if (next === previous) return;
+  event.preventDefault();
+  scroller.scrollLeft = next;
+}
+
+function beginActionDrag(event) {
+  if (event.pointerType !== "mouse" || event.button !== 0) return;
+  const scroller = event.target.closest(".item-actions");
+  if (!scroller || scroller.scrollWidth <= scroller.clientWidth) return;
+  state.actionDrag = {
+    scroller,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startScroll: scroller.scrollLeft,
+    moved: false,
+  };
+  scroller.setPointerCapture?.(event.pointerId);
+}
+
+function moveActionDrag(event) {
+  const drag = state.actionDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const distance = event.clientX - drag.startX;
+  if (Math.abs(distance) > 4) {
+    drag.moved = true;
+    drag.scroller.classList.add("dragging");
+    drag.scroller.scrollLeft = drag.startScroll - distance;
+    event.preventDefault();
+  }
+}
+
+function endActionDrag(event) {
+  const drag = state.actionDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  drag.scroller.releasePointerCapture?.(event.pointerId);
+  drag.scroller.classList.remove("dragging");
+  if (drag.moved) {
+    drag.scroller.dataset.suppressClick = "true";
+    setTimeout(() => delete drag.scroller.dataset.suppressClick, 300);
+  }
+  state.actionDrag = null;
+}
+
+function handleActionsKeydown(event) {
+  const scroller = event.target.closest(".item-actions");
+  if (!scroller || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  event.preventDefault();
+  scroller.scrollBy({ left: event.key === "ArrowRight" ? 110 : -110, behavior: "smooth" });
+}
+
+function formatDuration(value) {
+  if (!Number.isFinite(value) || value < 0) return "0:00";
+  const total = Math.floor(value);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`;
 }
 
 async function updateItem(itemId, patch, notice) {
