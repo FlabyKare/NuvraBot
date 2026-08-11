@@ -31,15 +31,31 @@ async def test_item_lifecycle_and_stats(database: Database) -> None:
     assert saved["category"] == "development"
     assert (await database.stats(101))["total"] == 1
 
-    found = await database.search_fts(101, "WireGuard")
+    found = await database.search_fts(101, "Найди тот пост про настройку WireGuard")
     assert [item["id"] for item in found] == [saved["id"]]
+
+    video = await database.create_item(
+        101,
+        NewItem(
+            kind="video",
+            category="watch",
+            title="Видео из Telegram",
+            telegram_file_id="telegram-file-id",
+            telegram_file_unique_id="unique-file-id",
+            file_name="guide.mp4",
+            mime_type="video/mp4",
+        ),
+    )
+    assert video["has_media"] is True
+    media = await database.get_media_item(101, video["id"])
+    assert media and media["telegram_file_id"] == "telegram-file-id"
 
     updated = await database.patch_item(101, saved["id"], ItemPatch(favorite=True, read=True))
     assert updated and updated["favorite"] is True
     assert updated["read"] is True
 
     assert await database.delete_item(101, saved["id"]) is True
-    assert (await database.stats(101))["total"] == 0
+    assert (await database.stats(101))["total"] == 1
 
 
 @pytest.mark.asyncio

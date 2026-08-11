@@ -45,6 +45,7 @@ class ItemView(BaseModel):
     title: str
     text: str
     url: str | None
+    has_media: bool = False
     file_name: str | None
     mime_type: str | None
     source_chat: str | None

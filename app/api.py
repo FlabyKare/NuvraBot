@@ -1,13 +1,18 @@
 import asyncio
 import contextlib
+import hashlib
+import hmac
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
-from fastapi.responses import FileResponse
+import aiohttp
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .ai_service import AIService
@@ -19,6 +24,12 @@ from .telegram_auth import TelegramAuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
 WEB_DIR = BASE_DIR / "web"
+MEDIA_URL_TTL_SECONDS = 15 * 60
+
+
+def media_signature(secret: str, telegram_id: int, item_id: int, expires: int) -> str:
+    payload = f"{telegram_id}:{item_id}:{expires}".encode()
+    return hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
 
 def create_app(
@@ -31,13 +42,15 @@ def create_app(
     ai = ai_service or AIService(app_settings)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         await db.init()
         tasks: list[asyncio.Task[object]] = []
         bot = None
+        app_instance.state.bot = None
         try:
             if app_settings.run_bot and app_settings.telegram_bot_token:
                 bot = create_bot(app_settings)
+                app_instance.state.bot = bot
                 dispatcher = create_dispatcher(app_settings, db, ai)
                 try:
                     await configure_bot(bot, app_settings)
@@ -65,6 +78,7 @@ def create_app(
                     await asyncio.gather(*tasks, return_exceptions=True)
             if bot is not None:
                 await bot.session.close()
+            app_instance.state.bot = None
             await db.close()
 
     app = FastAPI(
@@ -155,6 +169,111 @@ def create_app(
     ) -> dict[str, object]:
         result = await ai.search(db, user.id, q, limit=limit)
         return {"items": result, "query": q, "mode": "semantic" if ai.enabled else "full-text"}
+
+    @app.get("/api/items/{item_id}/media-url")
+    async def media_url(item_id: int, user: UserDependency) -> dict[str, object]:
+        if not app_settings.telegram_bot_token:
+            raise HTTPException(status_code=503, detail="Просмотр файлов временно недоступен")
+        item = await db.get_media_item(user.id, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="У этого сохранения нет доступного файла")
+        expires = int(time.time()) + MEDIA_URL_TTL_SECONDS
+        signature = media_signature(app_settings.telegram_bot_token, user.id, item_id, expires)
+        return {
+            "url": (
+                f"/api/items/{item_id}/media?telegram_id={user.id}"
+                f"&expires={expires}&signature={signature}"
+            ),
+            "kind": item["kind"],
+            "file_name": item["file_name"],
+            "mime_type": item["mime_type"],
+        }
+
+    @app.get("/api/items/{item_id}/media")
+    async def stream_media(
+        item_id: int,
+        request: Request,
+        telegram_id: int,
+        expires: int,
+        signature: str,
+    ) -> StreamingResponse:
+        now = int(time.time())
+        expected = media_signature(app_settings.telegram_bot_token, telegram_id, item_id, expires)
+        if (
+            not app_settings.telegram_bot_token
+            or expires < now
+            or expires > now + MEDIA_URL_TTL_SECONDS + 60
+            or not hmac.compare_digest(signature, expected)
+        ):
+            raise HTTPException(status_code=403, detail="Ссылка на файл недействительна или устарела")
+
+        item = await db.get_media_item(telegram_id, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Файл не найден")
+
+        bot = app.state.bot
+        temporary_bot = None
+        if bot is None:
+            temporary_bot = create_bot(app_settings)
+            bot = temporary_bot
+        try:
+            telegram_file = await bot.get_file(item["telegram_file_id"])
+        except Exception as exc:
+            logger.exception("Unable to resolve Telegram file for item %s", item_id)
+            raise HTTPException(status_code=502, detail="Telegram не смог подготовить файл") from exc
+        finally:
+            if temporary_bot is not None:
+                await temporary_bot.session.close()
+
+        if not telegram_file.file_path:
+            raise HTTPException(status_code=404, detail="Telegram больше не хранит этот файл")
+
+        telegram_url = (
+            f"https://api.telegram.org/file/bot{app_settings.telegram_bot_token}/"
+            f"{quote(telegram_file.file_path, safe='/')}"
+        )
+        upstream_headers = {}
+        if range_header := request.headers.get("range"):
+            upstream_headers["Range"] = range_header
+        session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=90)
+        )
+        try:
+            upstream = await session.get(telegram_url, headers=upstream_headers)
+        except aiohttp.ClientError as exc:
+            await session.close()
+            raise HTTPException(status_code=502, detail="Не удалось загрузить файл из Telegram") from exc
+        if upstream.status not in {200, 206}:
+            upstream.release()
+            await session.close()
+            raise HTTPException(status_code=502, detail="Telegram временно не отдаёт этот файл")
+
+        response_headers = {
+            "Accept-Ranges": upstream.headers.get("Accept-Ranges", "bytes"),
+            "Cache-Control": "private, max-age=300",
+        }
+        for header in ("Content-Length", "Content-Range", "ETag", "Last-Modified"):
+            if value := upstream.headers.get(header):
+                response_headers[header] = value
+        if item["file_name"]:
+            response_headers["Content-Disposition"] = (
+                f"inline; filename*=UTF-8''{quote(item['file_name'])}"
+            )
+
+        async def telegram_chunks() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in upstream.content.iter_chunked(64 * 1024):
+                    yield chunk
+            finally:
+                upstream.release()
+                await session.close()
+
+        return StreamingResponse(
+            telegram_chunks(),
+            status_code=upstream.status,
+            media_type=item["mime_type"] or upstream.headers.get("Content-Type"),
+            headers=response_headers,
+        )
 
     @app.patch("/api/items/{item_id}")
     async def patch_item(item_id: int, patch: ItemPatch, user: UserDependency) -> dict[str, object]:

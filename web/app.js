@@ -21,6 +21,8 @@ const state = {
   items: [],
   stats: null,
   searchTimer: null,
+  itemsLoaded: false,
+  requestId: 0,
 };
 
 const elements = {
@@ -119,7 +121,7 @@ async function loadMe() {
     const me = await api("/api/me");
     elements.searchMode.textContent = me.ai_enabled
       ? "AI-поиск понимает смысл, контекст и формулировки"
-      : "Полнотекстовый поиск · AI включается через OPENAI_API_KEY";
+      : "Поиск работает по ключевым словам · AI-режим можно подключить позже";
   } catch (error) {
     showToast(error.message);
   }
@@ -151,6 +153,7 @@ function renderCategories() {
 }
 
 async function loadItems() {
+  const requestId = ++state.requestId;
   setLoading();
   state.query = "";
   const params = new URLSearchParams({ limit: "50" });
@@ -159,12 +162,15 @@ async function loadItems() {
   if (state.filter === "unread") params.set("unread", "true");
   try {
     const payload = await api(`/api/items?${params}`);
+    if (requestId !== state.requestId) return;
     state.items = payload.items;
     elements.resultsLabel.textContent = state.category ? "КАТЕГОРИЯ" : "ПОСЛЕДНИЕ";
     elements.libraryTitle.textContent = state.category ? categoryNames[state.category] : "Сохранения";
     renderItems();
   } catch (error) {
-    renderError(error);
+    if (requestId === state.requestId) renderError(error);
+  } finally {
+    if (requestId === state.requestId) clearLoading();
   }
 }
 
@@ -174,19 +180,24 @@ async function runSearch(query) {
     await loadItems();
     return;
   }
+  const requestId = ++state.requestId;
   setLoading();
   try {
     const payload = await api(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
+    if (requestId !== state.requestId) return;
     state.items = payload.items;
     elements.resultsLabel.textContent = payload.mode === "semantic" ? "AI-ПОИСК" : "ПОИСК";
     elements.libraryTitle.textContent = `Результаты · ${payload.items.length}`;
     renderItems();
   } catch (error) {
-    renderError(error);
+    if (requestId === state.requestId) renderError(error);
+  } finally {
+    if (requestId === state.requestId) clearLoading();
   }
 }
 
 function renderItems() {
+  state.itemsLoaded = true;
   if (!state.items.length) {
     elements.itemsList.innerHTML = `
       <div class="empty-state">
@@ -195,10 +206,10 @@ function renderItems() {
       </div>`;
     return;
   }
-  elements.itemsList.innerHTML = state.items.map((item, index) => renderItem(item, index)).join("");
+  elements.itemsList.innerHTML = state.items.map((item) => renderItem(item)).join("");
 }
 
-function renderItem(item, index) {
+function renderItem(item) {
   const title = escapeHtml(item.title);
   const titleElement = item.url
     ? `<a class="item-title" href="${escapeAttribute(item.url)}" target="_blank" rel="noopener">${title}</a>`
@@ -213,13 +224,15 @@ function renderItem(item, index) {
   const reminder = item.reminder_at
     ? `<span class="meta-dot"></span><span class="reminder-label">⏰ ${formatDate(item.reminder_at)}</span>`
     : "";
+  const media = item.has_media ? renderMediaLauncher(item) : "";
   return `
-    <article class="item-card ${item.read ? "read" : ""}" data-item-id="${item.id}" style="animation-delay:${Math.min(index * 25, 180)}ms">
+    <article class="item-card ${item.read ? "read" : ""}" data-item-id="${item.id}">
       <div class="item-top">
         <span class="category-chip">${escapeHtml(categoryNames[item.category] || "Без категории")}</span>
         <button class="favorite-button ${item.favorite ? "active" : ""}" data-action="favorite" aria-label="Избранное">${item.favorite ? "★" : "☆"}</button>
       </div>
       ${titleElement}
+      ${media}
       ${excerpt}
       ${summary}
       <div class="item-meta">
@@ -235,6 +248,27 @@ function renderItem(item, index) {
         <button class="action-button danger" data-action="delete">Удалить</button>
       </div>
     </article>`;
+}
+
+function renderMediaLauncher(item) {
+  const labels = {
+    video: ["▶", "Смотреть видео"],
+    audio: ["♪", "Слушать аудио"],
+    voice: ["◉", "Слушать голосовое"],
+    photo: ["▧", "Открыть изображение"],
+    file: ["↓", "Открыть файл"],
+  };
+  const [icon, label] = labels[item.kind] || labels.file;
+  return `
+    <div class="item-media-slot" data-media-slot>
+      <button class="media-launcher" data-action="media">
+        <span class="media-launcher-icon">${icon}</span>
+        <span>
+          <b>${label}</b>
+          ${item.file_name ? `<small>${escapeHtml(item.file_name)}</small>` : ""}
+        </span>
+      </button>
+    </div>`;
 }
 
 async function handleItemAction(event) {
@@ -261,6 +295,8 @@ async function handleItemAction(event) {
       const updated = await api(`/api/items/${itemId}/summary`, { method: "POST" });
       replaceItem(updated);
       showToast("Суммаризация готова");
+    } else if (action === "media") {
+      await openMedia(item, card);
     } else if (action === "delete") {
       const confirmed = await askConfirm("Удалить это сохранение?");
       if (!confirmed) return;
@@ -274,6 +310,24 @@ async function handleItemAction(event) {
     showToast(error.message);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function openMedia(item, card) {
+  const slot = card.querySelector("[data-media-slot]");
+  if (!slot) return;
+  slot.classList.add("loading");
+  const media = await api(`/api/items/${item.id}/media-url`);
+  const source = escapeAttribute(media.url);
+  const title = escapeAttribute(item.title);
+  if (item.kind === "video") {
+    slot.innerHTML = `<video class="item-media" controls playsinline preload="metadata" src="${source}" aria-label="${title}"></video>`;
+  } else if (item.kind === "audio" || item.kind === "voice") {
+    slot.innerHTML = `<audio class="item-audio" controls preload="metadata" src="${source}" aria-label="${title}"></audio>`;
+  } else if (item.kind === "photo") {
+    slot.innerHTML = `<img class="item-media" loading="lazy" src="${source}" alt="${title}" />`;
+  } else {
+    slot.innerHTML = `<a class="media-file" href="${source}" target="_blank" rel="noopener">Открыть ${escapeHtml(media.file_name || "файл")} ↗</a>`;
   }
 }
 
@@ -303,10 +357,24 @@ async function refreshAll() {
 }
 
 function setLoading() {
-  elements.itemsList.innerHTML = '<div class="skeleton-card"></div><div class="skeleton-card short"></div>';
+  elements.itemsList.classList.add("loading");
+  elements.itemsList.setAttribute("aria-busy", "true");
+  if (!state.itemsLoaded) {
+    elements.itemsList.innerHTML = `
+      <div class="loading-state">
+        <span class="loading-dot"></span>
+        Загружаю сохранения…
+      </div>`;
+  }
+}
+
+function clearLoading() {
+  elements.itemsList.classList.remove("loading");
+  elements.itemsList.setAttribute("aria-busy", "false");
 }
 
 function renderError(error) {
+  state.itemsLoaded = true;
   elements.itemsList.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
 }
 

@@ -13,6 +13,36 @@ from .models import ItemPatch, NewItem, TelegramUser
 
 CATEGORIES = ("inbox", "links", "watch", "development", "buy", "read", "files")
 FTS_WORD_RE = re.compile(r"[\w\-]+", re.UNICODE)
+SEARCH_STOP_WORDS = {
+    "а",
+    "в",
+    "во",
+    "где",
+    "для",
+    "и",
+    "из",
+    "как",
+    "какой",
+    "который",
+    "мне",
+    "мой",
+    "на",
+    "найди",
+    "но",
+    "о",
+    "от",
+    "по",
+    "покажи",
+    "про",
+    "с",
+    "сохранял",
+    "сохранённый",
+    "тот",
+    "у",
+    "хотел",
+    "что",
+    "я",
+}
 
 
 def utc_now() -> datetime:
@@ -292,6 +322,18 @@ class Database:
         )
         return self._public_item(row) if row else None
 
+    async def get_media_item(self, telegram_id: int, item_id: int) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            """
+            SELECT items.id, items.kind, items.telegram_file_id, items.file_name, items.mime_type
+            FROM items
+            JOIN users ON users.id = items.user_id
+            WHERE users.telegram_id = ? AND items.id = ? AND items.telegram_file_id IS NOT NULL
+            """,
+            (telegram_id, item_id),
+        )
+        return dict(row) if row else None
+
     async def list_items(
         self,
         telegram_id: int,
@@ -326,11 +368,14 @@ class Database:
         return [self._public_item(row) for row in rows]
 
     async def search_fts(self, telegram_id: int, query: str, limit: int = 30) -> list[dict[str, Any]]:
-        terms = FTS_WORD_RE.findall(query.casefold())
+        all_terms = FTS_WORD_RE.findall(query.casefold())
+        terms = [term for term in all_terms if len(term) > 1 and term not in SEARCH_STOP_WORDS]
+        if not terms:
+            terms = all_terms
         if not terms:
             return []
         if self.fts_enabled:
-            fts_query = " AND ".join(f'"{term}"*' for term in terms[:12])
+            fts_query = " OR ".join(f'"{term}"*' for term in terms[:12])
             try:
                 rows = await self._fetchall(
                     """
@@ -348,17 +393,22 @@ class Database:
             except aiosqlite.OperationalError:
                 pass
 
-        like_query = f"%{'%'.join(terms)}%"
+        searchable = (
+            "lower(items.title || ' ' || items.text || ' ' || COALESCE(items.url, '') || ' ' || "
+            "COALESCE(items.file_name, '') || ' ' || COALESCE(items.source_chat, ''))"
+        )
+        like_conditions = " OR ".join(f"{searchable} LIKE ?" for _ in terms[:12])
+        like_params = [f"%{term}%" for term in terms[:12]]
         rows = await self._fetchall(
-            """
+            f"""
             SELECT items.* FROM items
             JOIN users ON users.id = items.user_id
             WHERE users.telegram_id = ?
-              AND lower(items.title || ' ' || items.text || ' ' || COALESCE(items.url, '')) LIKE ?
+              AND ({like_conditions})
             ORDER BY items.created_at DESC
             LIMIT ?
             """,
-            (telegram_id, like_query, limit),
+            (telegram_id, *like_params, limit),
         )
         return [self._public_item(row, score=0.5) for row in rows]
 
@@ -503,6 +553,7 @@ class Database:
             "title": values["title"],
             "text": values["text"],
             "url": values["url"],
+            "has_media": bool(values["telegram_file_id"]),
             "file_name": values["file_name"],
             "mime_type": values["mime_type"],
             "source_chat": values["source_chat"],
