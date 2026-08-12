@@ -434,6 +434,9 @@ async function handleItemAction(event) {
         card.querySelectorAll('[data-action="category"]').forEach((trigger) => {
           trigger.setAttribute("aria-expanded", String(willOpen));
         });
+        if (willOpen) {
+          picker.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
       }
     } else if (action === "category-choice") {
       const category = button.dataset.categoryValue;
@@ -621,7 +624,6 @@ function beginActionDrag(event) {
     startScroll: scroller.scrollLeft,
     moved: false,
   };
-  scroller.setPointerCapture?.(event.pointerId);
 }
 
 function moveActionDrag(event) {
@@ -629,6 +631,9 @@ function moveActionDrag(event) {
   if (!drag || drag.pointerId !== event.pointerId) return;
   const distance = event.clientX - drag.startX;
   if (Math.abs(distance) > 4) {
+    if (!drag.moved) {
+      drag.scroller.setPointerCapture?.(event.pointerId);
+    }
     drag.moved = true;
     drag.scroller.classList.add("dragging");
     drag.scroller.scrollLeft = drag.startScroll - distance;
@@ -639,7 +644,9 @@ function moveActionDrag(event) {
 function endActionDrag(event) {
   const drag = state.actionDrag;
   if (!drag || drag.pointerId !== event.pointerId) return;
-  drag.scroller.releasePointerCapture?.(event.pointerId);
+  if (drag.moved && drag.scroller.hasPointerCapture?.(event.pointerId)) {
+    drag.scroller.releasePointerCapture(event.pointerId);
+  }
   drag.scroller.classList.remove("dragging");
   if (drag.moved) {
     drag.scroller.dataset.suppressClick = "true";
