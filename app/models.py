@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
-Category = Literal["inbox", "links", "watch", "development", "buy", "read", "files"]
+Category = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, pattern=r"^[a-z][a-z0-9_]{0,31}$"),
+]
 ItemKind = Literal["text", "link", "photo", "video", "audio", "voice", "file", "code"]
+
+
+class CategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    icon: str = Field(default="🗂", min_length=1, max_length=8)
+
+    @field_validator("name", "icon", mode="before")
+    @classmethod
+    def strip_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class CategoryPatch(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class NewItem(BaseModel):

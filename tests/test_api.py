@@ -23,6 +23,29 @@ def test_health_and_dev_auth(tmp_path) -> None:
         assert response.status_code == 200
         assert response.json()["total"] == 0
 
+        categories = client.get(
+            "/api/categories",
+            headers={"X-Dev-Telegram-User": "77"},
+        )
+        assert categories.status_code == 200
+        assert any(category["id"] == "watch" for category in categories.json()["categories"])
+
+        created_category = client.post(
+            "/api/categories",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"name": "Курсы", "icon": "🎓"},
+        )
+        assert created_category.status_code == 201
+        custom_category = created_category.json()
+
+        renamed_category = client.patch(
+            f"/api/categories/{custom_category['id']}",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"name": "Обучение"},
+        )
+        assert renamed_category.status_code == 200
+        assert renamed_category.json()["name"] == "Обучение"
+
         saved = client.portal.call(
             database.create_item,
             77,
@@ -47,6 +70,21 @@ def test_health_and_dev_auth(tmp_path) -> None:
             params={"telegram_id": 77, "expires": 123456, "signature": "invalid"},
         )
         assert invalid_media_response.status_code == 403
+
+        invalid_category = client.patch(
+            f"/api/items/{saved['id']}",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"category": "missing"},
+        )
+        assert invalid_category.status_code == 400
+
+        moved = client.patch(
+            f"/api/items/{saved['id']}",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"category": custom_category["id"]},
+        )
+        assert moved.status_code == 200
+        assert moved.json()["category"] == custom_category["id"]
 
 
 def test_media_signature_is_scoped_to_user_and_item() -> None:

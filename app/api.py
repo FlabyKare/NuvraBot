@@ -19,7 +19,7 @@ from .ai_service import AIService
 from .bot import configure_bot, create_bot, create_dispatcher, reminder_worker
 from .config import BASE_DIR, Settings, get_settings
 from .database import Database
-from .models import ItemPatch, TelegramUser
+from .models import CategoryCreate, CategoryPatch, ItemPatch, TelegramUser
 from .telegram_auth import TelegramAuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,31 @@ def create_app(
     @app.get("/api/stats")
     async def stats(user: UserDependency) -> dict[str, object]:
         return await db.stats(user.id)
+
+    @app.get("/api/categories")
+    async def categories(user: UserDependency) -> dict[str, object]:
+        return {"categories": await db.list_categories(user.id)}
+
+    @app.post("/api/categories", status_code=status.HTTP_201_CREATED)
+    async def create_category(category: CategoryCreate, user: UserDependency) -> dict[str, object]:
+        try:
+            return await db.create_category(user.id, category.name, category.icon)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.patch("/api/categories/{category_key}")
+    async def rename_category(
+        category_key: str,
+        patch: CategoryPatch,
+        user: UserDependency,
+    ) -> dict[str, object]:
+        try:
+            category = await db.rename_category(user.id, category_key, patch.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+        return category
 
     @app.get("/api/items")
     async def items(
@@ -284,6 +309,8 @@ def create_app(
 
     @app.patch("/api/items/{item_id}")
     async def patch_item(item_id: int, patch: ItemPatch, user: UserDependency) -> dict[str, object]:
+        if patch.category and not await db.has_category(user.id, patch.category):
+            raise HTTPException(status_code=400, detail="Неизвестная категория")
         item = await db.patch_item(user.id, item_id, patch)
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")

@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Second Brain</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-library" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260812-categories" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/static/app.js?v=20260812-library" defer></script>
+    <script src="/static/app.js?v=20260812-categories" defer></script>
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -48,7 +48,25 @@
             <p class="eyebrow">КОЛЛЕКЦИЯ</p>
             <h3 id="overviewTitle">Мои сохранённые</h3>
           </div>
-          <div class="total-pill"><span id="totalCount">0</span> всего</div>
+          <div class="heading-actions">
+            <button class="manage-categories-button" id="manageCategoriesButton" type="button">⚙ Категории</button>
+            <div class="total-pill"><span id="totalCount">0</span> всего</div>
+          </div>
+        </div>
+        <div class="category-manager" id="categoryManager" hidden>
+          <div class="category-manager-head">
+            <div>
+              <b>Мои категории</b>
+              <small>Создавай новые и переименовывай существующие</small>
+            </div>
+            <button class="category-manager-close" id="categoryManagerClose" type="button" aria-label="Закрыть">×</button>
+          </div>
+          <form class="category-create" id="categoryCreateForm">
+            <input id="categoryIconInput" maxlength="8" value="🗂" aria-label="Иконка категории" />
+            <input id="categoryNameInput" maxlength="40" placeholder="Например, Путешествия" required />
+            <button type="submit">Добавить</button>
+          </form>
+          <div class="category-manager-list" id="categoryManagerList"></div>
         </div>
         <div class="category-grid" id="categoryGrid" aria-live="polite"></div>
       </section>

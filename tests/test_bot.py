@@ -28,3 +28,25 @@ def test_category_keyboard_contains_every_category_and_back() -> None:
     assert "itemcat:inbox:7" in callback_data
     assert "itemcat:read:7" in callback_data
     assert "item:back:7" in callback_data
+
+
+def test_category_keyboard_supports_custom_category_names() -> None:
+    categories = [
+        {
+            "id": "inbox",
+            "name": "Входящие",
+            "icon": "🧠",
+            "label": "🧠 Входящие",
+        },
+        {
+            "id": "c_123",
+            "name": "Путешествия",
+            "icon": "✈️",
+            "label": "✈️ Путешествия",
+        },
+    ]
+    keyboard = category_keyboard({"id": 9, "category": "c_123"}, categories)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+
+    assert any(button.callback_data == "itemcat:c_123:9" for button in buttons)
+    assert any(button.text == "✓ ✈️ Путешествия" for button in buttons)

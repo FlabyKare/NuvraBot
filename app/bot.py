@@ -23,6 +23,7 @@ from aiogram.types import (
 )
 
 from .ai_service import AIService
+from .categories import DEFAULT_CATEGORY_LABELS, default_category_views
 from .classifier import classify, first_url, make_title
 from .config import Settings
 from .database import Database
@@ -30,15 +31,7 @@ from .models import ItemPatch, NewItem, TelegramUser
 
 logger = logging.getLogger(__name__)
 
-CATEGORY_LABELS = {
-    "inbox": "🧠 Без категории",
-    "links": "🔗 Ссылки",
-    "watch": "🎬 Посмотреть",
-    "development": "💻 Разработка",
-    "buy": "🛒 Купить",
-    "read": "📚 Почитать",
-    "files": "📁 Файлы",
-}
+CATEGORY_LABELS = DEFAULT_CATEGORY_LABELS
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -181,11 +174,12 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
     async def stats(message: Message) -> None:
         user_id = await remember_user(database, message)
         counters = await database.stats(user_id)
+        categories = await database.list_categories(user_id)
         lines = [f"<b>Сохранено: {counters['total']}</b>"]
-        for category, label in CATEGORY_LABELS.items():
-            amount = counters["categories"].get(category, 0)
+        for category in categories:
+            amount = counters["categories"].get(category["id"], 0)
             if amount:
-                lines.append(f"{label}: {amount}")
+                lines.append(f"{html.escape(category['label'])}: {amount}")
         lines.append(f"\n⭐ В избранном: {counters['favorites']}")
         lines.append(f"📥 Не прочитано: {counters['unread']}")
         await message.answer("\n".join(lines), reply_markup=mini_app_keyboard(settings))
@@ -204,10 +198,11 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         if not results:
             await wait_message.edit_text("Ничего похожего не нашлось. Попробуй сформулировать иначе.")
             return
+        labels = await database.category_labels(user_id)
         lines = [f"<b>Нашёл по запросу:</b> {html.escape(query)}"]
         for index, item in enumerate(results, start=1):
             title = html.escape(item["title"])
-            category = CATEGORY_LABELS.get(item["category"], "🧠")
+            category = html.escape(labels.get(item["category"], "🧠 Без категории"))
             if item.get("url"):
                 title = f'<a href="{html.escape(item["url"], quote=True)}">{title}</a>'
             lines.append(f"\n{index}. {category}\n<b>{title}</b>")
@@ -228,6 +223,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         if not item:
             await callback.answer("Сохранение не найдено", show_alert=True)
             return
+        categories = await database.list_categories(user_id)
 
         notice = "Готово"
         if action == "favorite":
@@ -250,12 +246,14 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         elif action == "category":
             await callback.answer("Выбери категорию")
             if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=category_keyboard(item))
+                await callback.message.edit_reply_markup(
+                    reply_markup=category_keyboard(item, categories)
+                )
             return
         elif action == "back":
             await callback.answer()
             if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
+                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item, categories))
             return
         elif action == "summary":
             await callback.answer("Готовлю краткое содержание…")
@@ -271,7 +269,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         await callback.answer(notice)
         if callback.message and item:
             try:
-                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
+                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item, categories))
             except Exception:
                 logger.debug("Unable to refresh inline keyboard", exc_info=True)
 
@@ -285,7 +283,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         except (ValueError, TypeError):
             await callback.answer("Некорректная категория", show_alert=True)
             return
-        if category not in CATEGORY_LABELS:
+        if not await database.has_category(callback.from_user.id, category):
             await callback.answer("Неизвестная категория", show_alert=True)
             return
         item = await database.patch_item(
@@ -296,10 +294,12 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         if not item:
             await callback.answer("Сохранение не найдено", show_alert=True)
             return
-        await callback.answer(f"Категория: {CATEGORY_LABELS[category]}")
+        categories = await database.list_categories(callback.from_user.id)
+        labels = {row["id"]: row["label"] for row in categories}
+        await callback.answer(f"Категория: {labels[category]}")
         if callback.message:
             try:
-                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
+                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item, categories))
             except Exception:
                 logger.debug("Unable to refresh category keyboard", exc_info=True)
 
@@ -320,10 +320,13 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         new_item = extract_item(message)
         embedding = await ai.embed(new_item.searchable_text)
         saved = await database.create_item(user_id, new_item, embedding=embedding)
-        category = CATEGORY_LABELS.get(saved["category"], "🧠 Без категории")
+        categories = await database.list_categories(user_id)
+        labels = {row["id"]: row["label"] for row in categories}
+        category = labels.get(saved["category"], "🧠 Без категории")
+        title_line = "" if saved["kind"] == "video" else f"\n{html.escape(saved['title'])}"
         await message.answer(
-            f"<b>Сохранено</b> · {category}\n{html.escape(saved['title'])}",
-            reply_markup=item_keyboard(saved),
+            f"<b>Сохранено</b> · {html.escape(category)}{title_line}",
+            reply_markup=item_keyboard(saved, categories),
             disable_web_page_preview=True,
         )
 
@@ -397,7 +400,11 @@ def extract_item(message: Message) -> NewItem:
     return NewItem(
         kind=kind,
         category=category,
-        title=make_title(text, url=url, file_name=file_name),
+        title=(
+            "Видео"
+            if kind == "video" and not text and not url
+            else make_title(text, url=url, file_name=None if kind == "video" else file_name)
+        ),
         text=text,
         url=url,
         telegram_file_id=file_id,
@@ -440,8 +447,13 @@ def mini_app_keyboard(settings: Settings) -> InlineKeyboardMarkup | None:
     )
 
 
-def item_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
+def item_keyboard(
+    item: dict[str, Any],
+    categories: list[dict[str, Any]] | None = None,
+) -> InlineKeyboardMarkup:
     item_id = item["id"]
+    category_rows = categories or default_category_views()
+    labels = {category["id"]: category["label"] for category in category_rows}
     rows = [
             [
                 InlineKeyboardButton(
@@ -466,7 +478,7 @@ def item_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    text=f"📂 Категория · {CATEGORY_LABELS.get(item.get('category'), 'Без категории')}",
+                    text=f"📂 Категория · {labels.get(item.get('category'), 'Без категории')}",
                     callback_data=f"item:category:{item_id}",
                 )
             ],
@@ -476,15 +488,19 @@ def item_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def category_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
+def category_keyboard(
+    item: dict[str, Any],
+    categories: list[dict[str, Any]] | None = None,
+) -> InlineKeyboardMarkup:
     item_id = item["id"]
     current = item.get("category")
+    category_rows = categories or default_category_views()
     buttons = [
         InlineKeyboardButton(
-            text=f"{'✓ ' if category == current else ''}{label}",
-            callback_data=f"itemcat:{category}:{item_id}",
+            text=f"{'✓ ' if category['id'] == current else ''}{category['label']}",
+            callback_data=f"itemcat:{category['id']}:{item_id}",
         )
-        for category, label in CATEGORY_LABELS.items()
+        for category in category_rows
     ]
     rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"item:back:{item_id}")])
@@ -499,10 +515,11 @@ async def reminder_worker(bot: Bot, database: Database, poll_seconds: int) -> No
                 text = f"<b>⏰ Ты хотел вернуться к этому:</b>\n\n{title}"
                 if item.get("url"):
                     text += f'\n<a href="{html.escape(item["url"], quote=True)}">Открыть ссылку</a>'
+                categories = await database.list_categories(item["telegram_id"])
                 await bot.send_message(
                     item["telegram_id"],
                     text,
-                    reply_markup=item_keyboard(item),
+                    reply_markup=item_keyboard(item, categories),
                     disable_web_page_preview=True,
                 )
                 await database.mark_reminder_sent(item["id"])

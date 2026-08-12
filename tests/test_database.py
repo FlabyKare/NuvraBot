@@ -50,6 +50,18 @@ async def test_item_lifecycle_and_stats(database: Database) -> None:
     media = await database.get_media_item(101, video["id"])
     assert media and media["telegram_file_id"] == "telegram-file-id"
 
+    legacy_video = await database.create_item(
+        101,
+        NewItem(
+            kind="video",
+            category="watch",
+            title="IMG_1328.MP4",
+            telegram_file_id="legacy-video-id",
+            file_name="IMG_1328.MP4",
+        ),
+    )
+    assert legacy_video["title"] == "Видео"
+
     updated = await database.patch_item(101, saved["id"], ItemPatch(favorite=True, read=True))
     assert updated and updated["favorite"] is True
     assert updated["read"] is True
@@ -67,7 +79,7 @@ async def test_item_lifecycle_and_stats(database: Database) -> None:
     assert updated and updated["reminder_at"] is None
 
     assert await database.delete_item(101, saved["id"]) is True
-    assert (await database.stats(101))["total"] == 1
+    assert (await database.stats(101))["total"] == 2
 
 
 @pytest.mark.asyncio
@@ -84,3 +96,30 @@ async def test_payment_is_idempotent(database: Database) -> None:
     assert await database.activate_pro(202, **payment) is False
     user = await database.get_user(202)
     assert user and user["is_pro"] is True
+
+
+@pytest.mark.asyncio
+async def test_custom_categories_are_created_renamed_and_counted(database: Database) -> None:
+    await database.upsert_user(303)
+    categories = await database.list_categories(303)
+    assert {category["id"] for category in categories} >= {"inbox", "watch", "files"}
+
+    custom = await database.create_category(303, "Путешествия", "✈️")
+    assert custom["name"] == "Путешествия"
+    assert custom["is_system"] is False
+    assert await database.has_category(303, custom["id"]) is True
+
+    renamed = await database.rename_category(303, custom["id"], "Поездки")
+    assert renamed and renamed["name"] == "Поездки"
+
+    saved = await database.create_item(
+        303,
+        NewItem(title="Маршрут", category="inbox"),
+    )
+    moved = await database.patch_item(
+        303,
+        saved["id"],
+        ItemPatch(category=custom["id"]),
+    )
+    assert moved and moved["category"] == custom["id"]
+    assert (await database.stats(303))["categories"][custom["id"]] == 1

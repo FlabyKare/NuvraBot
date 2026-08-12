@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from .categories import DEFAULT_CATEGORIES
 from .models import ItemPatch, NewItem, TelegramUser
 
-CATEGORIES = ("inbox", "links", "watch", "development", "buy", "read", "files")
 FTS_WORD_RE = re.compile(r"[\w\-]+", re.UNICODE)
+MAX_CUSTOM_CATEGORIES = 20
 SEARCH_STOP_WORDS = {
     "а",
     "в",
@@ -134,6 +136,20 @@ class Database:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                category_key TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                icon TEXT NOT NULL DEFAULT '🗂',
+                is_system INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, category_key),
+                UNIQUE(user_id, name)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_items_user_created
                 ON items(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_items_user_category
@@ -174,6 +190,31 @@ class Database:
             )
         except aiosqlite.OperationalError:
             self.fts_enabled = False
+        await self.conn.execute(
+            """
+            UPDATE items SET title = 'Видео', updated_at = ?
+            WHERE kind = 'video' AND file_name IS NOT NULL AND title = file_name
+            """,
+            (to_iso(),),
+        )
+        now = to_iso()
+        for category in DEFAULT_CATEGORIES:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO user_categories(
+                    user_id, category_key, name, icon, is_system, position, created_at, updated_at
+                )
+                SELECT id, ?, ?, ?, 1, ?, ?, ? FROM users
+                """,
+                (
+                    category["id"],
+                    category["name"],
+                    category["icon"],
+                    category["position"],
+                    now,
+                    now,
+                ),
+            )
         await self.conn.commit()
 
     async def close(self) -> None:
@@ -208,9 +249,143 @@ class Database:
                     now,
                 ),
             )
+            row = await (
+                await self.conn.execute("SELECT id FROM users WHERE telegram_id = ?", (user.id,))
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Unable to create user")
+            user_id = int(row["id"])
+            await self._insert_default_categories(user_id, now)
             await self.conn.commit()
-        row = await self._fetchone("SELECT id FROM users WHERE telegram_id = ?", (user.id,))
-        return int(row["id"])
+        return user_id
+
+    async def _insert_default_categories(self, user_id: int, now: str) -> None:
+        for category in DEFAULT_CATEGORIES:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO user_categories(
+                    user_id, category_key, name, icon, is_system, position, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    category["id"],
+                    category["name"],
+                    category["icon"],
+                    category["position"],
+                    now,
+                    now,
+                ),
+            )
+
+    async def list_categories(self, telegram_id: int) -> list[dict[str, Any]]:
+        await self.upsert_user(telegram_id)
+        rows = await self._fetchall(
+            """
+            SELECT categories.category_key, categories.name, categories.icon,
+                   categories.is_system, categories.position, COUNT(items.id) AS amount
+            FROM user_categories AS categories
+            JOIN users ON users.id = categories.user_id
+            LEFT JOIN items
+              ON items.user_id = categories.user_id
+             AND items.category = categories.category_key
+            WHERE users.telegram_id = ?
+            GROUP BY categories.id
+            ORDER BY categories.position, categories.id
+            """,
+            (telegram_id,),
+        )
+        return [
+            {
+                "id": row["category_key"],
+                "name": row["name"],
+                "icon": row["icon"],
+                "label": f"{row['icon']} {row['name']}",
+                "is_system": bool(row["is_system"]),
+                "position": int(row["position"]),
+                "count": int(row["amount"] or 0),
+            }
+            for row in rows
+        ]
+
+    async def category_labels(self, telegram_id: int) -> dict[str, str]:
+        return {category["id"]: category["label"] for category in await self.list_categories(telegram_id)}
+
+    async def has_category(self, telegram_id: int, category_key: str) -> bool:
+        row = await self._fetchone(
+            """
+            SELECT 1 FROM user_categories AS categories
+            JOIN users ON users.id = categories.user_id
+            WHERE users.telegram_id = ? AND categories.category_key = ?
+            """,
+            (telegram_id, category_key),
+        )
+        return row is not None
+
+    async def create_category(self, telegram_id: int, name: str, icon: str = "🗂") -> dict[str, Any]:
+        user_id = await self.upsert_user(telegram_id)
+        now = to_iso()
+        category_key = f"c_{secrets.token_hex(5)}"
+        async with self._write_lock:
+            count_row = await (
+                await self.conn.execute(
+                    "SELECT COUNT(*) AS amount FROM user_categories WHERE user_id = ? AND is_system = 0",
+                    (user_id,),
+                )
+            ).fetchone()
+            if count_row and int(count_row["amount"]) >= MAX_CUSTOM_CATEGORIES:
+                raise ValueError(f"Можно создать не больше {MAX_CUSTOM_CATEGORIES} своих категорий")
+            position_row = await (
+                await self.conn.execute(
+                    """
+                    SELECT COALESCE(MAX(position), 0) + 1 AS next_position
+                    FROM user_categories WHERE user_id = ?
+                    """,
+                    (user_id,),
+                )
+            ).fetchone()
+            try:
+                await self.conn.execute(
+                    """
+                    INSERT INTO user_categories(
+                        user_id, category_key, name, icon, is_system, position, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (user_id, category_key, name, icon, int(position_row["next_position"]), now, now),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise ValueError("Категория с таким названием уже существует") from exc
+            await self.conn.commit()
+        return next(
+            category for category in await self.list_categories(telegram_id)
+            if category["id"] == category_key
+        )
+
+    async def rename_category(
+        self,
+        telegram_id: int,
+        category_key: str,
+        name: str,
+    ) -> dict[str, Any] | None:
+        async with self._write_lock:
+            try:
+                cursor = await self.conn.execute(
+                    """
+                    UPDATE user_categories SET name = ?, updated_at = ?
+                    WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                      AND category_key = ?
+                    """,
+                    (name, to_iso(), telegram_id, category_key),
+                )
+            except aiosqlite.IntegrityError as exc:
+                raise ValueError("Категория с таким названием уже существует") from exc
+            await self.conn.commit()
+        if not cursor.rowcount:
+            return None
+        return next(
+            category for category in await self.list_categories(telegram_id)
+            if category["id"] == category_key
+        )
 
     async def get_user(self, telegram_id: int) -> dict[str, Any] | None:
         row = await self._fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
@@ -346,7 +521,7 @@ class Database:
     ) -> list[dict[str, Any]]:
         conditions = ["users.telegram_id = ?"]
         params: list[Any] = [telegram_id]
-        if category and category in CATEGORIES:
+        if category:
             conditions.append("items.category = ?")
             params.append(category)
         if favorite is not None:
@@ -426,17 +601,8 @@ class Database:
         return [dict(row) for row in rows]
 
     async def stats(self, telegram_id: int) -> dict[str, Any]:
-        rows = await self._fetchall(
-            """
-            SELECT items.category, COUNT(*) AS amount
-            FROM items JOIN users ON users.id = items.user_id
-            WHERE users.telegram_id = ?
-            GROUP BY items.category
-            """,
-            (telegram_id,),
-        )
-        categories = {category: 0 for category in CATEGORIES}
-        categories.update({row["category"]: row["amount"] for row in rows})
+        category_rows = await self.list_categories(telegram_id)
+        categories = {category["id"]: category["count"] for category in category_rows}
         counters = await self._fetchone(
             """
             SELECT COUNT(*) AS total,
@@ -546,11 +712,14 @@ class Database:
     @staticmethod
     def _public_item(row: aiosqlite.Row, *, score: float | None = None) -> dict[str, Any]:
         values = dict(row)
+        title = values["title"]
+        if values["kind"] == "video" and values["file_name"] and title == values["file_name"]:
+            title = "Видео"
         return {
             "id": values["id"],
             "kind": values["kind"],
             "category": values["category"],
-            "title": values["title"],
+            "title": title,
             "text": values["text"],
             "url": values["url"],
             "has_media": bool(values["telegram_file_id"]),

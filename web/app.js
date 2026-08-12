@@ -1,21 +1,12 @@
 const tg = window.Telegram?.WebApp;
 
-const categories = [
-  { id: "links", label: "Ссылки", icon: "↗", tint: "rgba(102,182,255,.13)" },
-  { id: "watch", label: "Посмотреть", icon: "▶", tint: "rgba(255,127,200,.13)" },
-  { id: "development", label: "Разработка", icon: "⌘", tint: "rgba(146,117,255,.15)" },
-  { id: "buy", label: "Купить", icon: "◇", tint: "rgba(255,155,98,.14)" },
-  { id: "read", label: "Почитать", icon: "≡", tint: "rgba(200,255,98,.12)" },
-  { id: "files", label: "Файлы", icon: "▱", tint: "rgba(255,255,255,.09)" },
-];
-
-const categoryNames = Object.fromEntries([
-  ["inbox", "Без категории"],
-  ...categories.map((category) => [category.id, category.label]),
-]);
-const pickerCategories = [
-  { id: "inbox", label: "Без категории", icon: "🧠" },
-  ...categories,
+const categoryTints = [
+  "rgba(200,255,98,.12)",
+  "rgba(102,182,255,.13)",
+  "rgba(255,127,200,.13)",
+  "rgba(146,117,255,.15)",
+  "rgba(255,155,98,.14)",
+  "rgba(255,255,255,.09)",
 ];
 
 const state = {
@@ -28,6 +19,8 @@ const state = {
   itemsLoaded: false,
   requestId: 0,
   actionDrag: null,
+  categories: [],
+  aiEnabled: false,
 };
 
 const elements = {
@@ -44,6 +37,13 @@ const elements = {
   libraryTitle: document.querySelector("#libraryTitle"),
   profileBadge: document.querySelector("#profileBadge"),
   toast: document.querySelector("#toast"),
+  manageCategoriesButton: document.querySelector("#manageCategoriesButton"),
+  categoryManager: document.querySelector("#categoryManager"),
+  categoryManagerClose: document.querySelector("#categoryManagerClose"),
+  categoryCreateForm: document.querySelector("#categoryCreateForm"),
+  categoryIconInput: document.querySelector("#categoryIconInput"),
+  categoryNameInput: document.querySelector("#categoryNameInput"),
+  categoryManagerList: document.querySelector("#categoryManagerList"),
 };
 
 function authHeaders() {
@@ -84,7 +84,8 @@ async function bootstrap() {
   }
 
   bindEvents();
-  await Promise.all([loadStats(), loadItems(), loadMe()]);
+  await Promise.all([loadCategories(), loadMe()]);
+  await Promise.all([loadStats(), loadItems()]);
 }
 
 function bindEvents() {
@@ -104,6 +105,14 @@ function bindEvents() {
     runSearch("");
   });
   elements.refreshButton.addEventListener("click", refreshAll);
+  elements.manageCategoriesButton.addEventListener("click", () => {
+    elements.categoryManager.hidden = !elements.categoryManager.hidden;
+  });
+  elements.categoryManagerClose.addEventListener("click", () => {
+    elements.categoryManager.hidden = true;
+  });
+  elements.categoryCreateForm.addEventListener("submit", createCategory);
+  elements.categoryManagerList.addEventListener("submit", renameCategory);
   elements.filterRow.addEventListener("click", (event) => {
     const button = event.target.closest("[data-filter]");
     if (!button) return;
@@ -132,12 +141,92 @@ function bindEvents() {
 async function loadMe() {
   try {
     const me = await api("/api/me");
+    state.aiEnabled = me.ai_enabled;
     elements.searchMode.textContent = me.ai_enabled
       ? "AI-поиск понимает смысл, контекст и формулировки"
       : "Поиск работает по ключевым словам · AI-режим можно подключить позже";
   } catch (error) {
     showToast(error.message);
   }
+}
+
+async function loadCategories() {
+  try {
+    const payload = await api("/api/categories");
+    state.categories = payload.categories;
+    renderCategoryManager();
+    if (state.stats) renderCategories();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function categoryById(categoryId) {
+  return state.categories.find((category) => category.id === categoryId);
+}
+
+function categoryName(categoryId) {
+  return categoryById(categoryId)?.name || "Без категории";
+}
+
+async function createCategory(event) {
+  event.preventDefault();
+  const name = elements.categoryNameInput.value.trim();
+  const icon = elements.categoryIconInput.value.trim() || "🗂";
+  if (!name) return;
+  const submit = event.submitter;
+  try {
+    if (submit) submit.disabled = true;
+    await api("/api/categories", {
+      method: "POST",
+      body: JSON.stringify({ name, icon }),
+    });
+    elements.categoryNameInput.value = "";
+    await loadCategories();
+    await loadStats();
+    renderItems();
+    showToast("Категория создана");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+async function renameCategory(event) {
+  const form = event.target.closest("[data-category-rename]");
+  if (!form) return;
+  event.preventDefault();
+  const input = form.querySelector("input");
+  const submit = form.querySelector("button");
+  const name = input.value.trim();
+  if (!name) return;
+  try {
+    submit.disabled = true;
+    await api(`/api/categories/${encodeURIComponent(form.dataset.categoryRename)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+    await loadCategories();
+    await loadStats();
+    renderItems();
+    if (state.category) elements.libraryTitle.textContent = categoryName(state.category);
+    showToast("Название сохранено");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function renderCategoryManager() {
+  elements.categoryManagerList.innerHTML = state.categories.map((category) => `
+    <form class="category-rename" data-category-rename="${escapeAttribute(category.id)}">
+      <span class="category-rename-icon">${escapeHtml(category.icon)}</span>
+      <input value="${escapeAttribute(category.name)}" maxlength="40" aria-label="Название категории ${escapeAttribute(category.name)}" required />
+      <button type="submit">Сохранить</button>
+    </form>
+  `).join("");
 }
 
 async function loadStats() {
@@ -152,14 +241,14 @@ async function loadStats() {
 
 function renderCategories() {
   if (!state.stats) return;
-  elements.categoryGrid.innerHTML = categories.map((category) => `
+  elements.categoryGrid.innerHTML = state.categories.map((category, index) => `
     <button
       class="category-card ${state.category === category.id ? "active" : ""}"
       data-category="${category.id}"
-      style="--category-tint:${category.tint}"
+      style="--category-tint:${categoryTints[index % categoryTints.length]}"
     >
-      <span class="category-icon">${category.icon}</span>
-      <span class="category-name">${category.label}</span>
+      <span class="category-icon">${escapeHtml(category.icon)}</span>
+      <span class="category-name">${escapeHtml(category.name)}</span>
       <span class="category-count">${state.stats.categories?.[category.id] || 0}</span>
     </button>
   `).join("");
@@ -178,7 +267,7 @@ async function loadItems() {
     if (requestId !== state.requestId) return;
     state.items = payload.items;
     elements.resultsLabel.textContent = state.category ? "КАТЕГОРИЯ" : "ПОСЛЕДНИЕ";
-    elements.libraryTitle.textContent = state.category ? categoryNames[state.category] : "Сохранения";
+    elements.libraryTitle.textContent = state.category ? categoryName(state.category) : "Сохранения";
     renderItems();
   } catch (error) {
     if (requestId === state.requestId) renderError(error);
@@ -224,7 +313,10 @@ function renderItems() {
 
 function renderItem(item) {
   const title = escapeHtml(item.title);
-  const titleElement = item.url
+  const filenameTitle = item.kind === "video" && item.file_name && item.title === item.file_name;
+  const titleElement = filenameTitle
+    ? ""
+    : item.url
     ? `<a class="item-title" href="${escapeAttribute(item.url)}" target="_blank" rel="noopener">${title}</a>`
     : `<span class="item-title">${title}</span>`;
   const excerpt = item.text && item.text !== item.title
@@ -242,7 +334,7 @@ function renderItem(item) {
     <article class="item-card ${item.read ? "read" : ""}" data-item-id="${item.id}">
       <div class="item-top">
         <button class="category-chip" data-action="category" aria-expanded="false">
-          ${escapeHtml(categoryNames[item.category] || "Без категории")} <span aria-hidden="true">⌄</span>
+          ${escapeHtml(categoryName(item.category))} <span aria-hidden="true">⌄</span>
         </button>
         <button class="favorite-button ${item.favorite ? "active" : ""}" data-action="favorite" aria-label="Избранное">${item.favorite ? "★" : "☆"}</button>
       </div>
@@ -262,7 +354,7 @@ function renderItem(item) {
         <button class="action-button" data-action="month">Через месяц</button>
         ${item.reminder_at ? '<button class="action-button reminder-cancel" data-action="cancel-reminder">🔕 Отменить</button>' : ""}
         <button class="action-button" data-action="category">📂 Категория</button>
-        <button class="action-button" data-action="summary">✨ Кратко</button>
+        <button class="action-button" data-action="summary">${state.aiEnabled ? "✨ AI-кратко" : "✨ Кратко"}</button>
         <button class="action-button danger" data-action="delete">Удалить</button>
       </div>
     </article>`;
@@ -273,13 +365,13 @@ function renderCategoryPicker(item) {
     <div class="category-picker" data-category-picker hidden>
       <span class="category-picker-title">Переместить в категорию</span>
       <div class="category-options">
-        ${pickerCategories.map((category) => `
+        ${state.categories.map((category) => `
           <button
             class="category-option ${item.category === category.id ? "active" : ""}"
             data-action="category-choice"
             data-category-value="${category.id}"
           >
-            <span>${category.icon}</span>${category.label}${item.category === category.id ? " ✓" : ""}
+            <span>${escapeHtml(category.icon)}</span>${escapeHtml(category.name)}${item.category === category.id ? " ✓" : ""}
           </button>
         `).join("")}
       </div>
@@ -301,7 +393,7 @@ function renderMediaLauncher(item) {
         <span class="media-launcher-icon">${icon}</span>
         <span>
           <b>${label}</b>
-          ${item.file_name ? `<small>${escapeHtml(item.file_name)}</small>` : ""}
+          ${item.kind !== "video" && item.file_name ? `<small>${escapeHtml(item.file_name)}</small>` : ""}
         </span>
       </button>
     </div>`;
@@ -345,10 +437,10 @@ async function handleItemAction(event) {
       }
     } else if (action === "category-choice") {
       const category = button.dataset.categoryValue;
-      if (!categoryNames[category]) throw new Error("Неизвестная категория");
-      await updateItem(itemId, { category }, `Перемещено: ${categoryNames[category]}`);
+      if (!categoryById(category)) throw new Error("Неизвестная категория");
+      await updateItem(itemId, { category }, `Перемещено: ${categoryName(category)}`);
     } else if (action === "summary") {
-      showToast("Готовлю краткое содержание…");
+      showToast(state.aiEnabled ? "AI готовит краткое содержание…" : "Готовлю краткое содержание…");
       const updated = await api(`/api/items/${itemId}/summary`, { method: "POST" });
       replaceItem(updated);
       showToast("Суммаризация готова");
@@ -386,7 +478,6 @@ async function openMedia(item, card) {
     slot.innerHTML = `
       <div class="video-player" data-video-player>
         <video class="item-video" data-video-action="toggle" playsinline preload="metadata" src="${source}" aria-label="${title}"></video>
-        <span class="video-caption">${escapeHtml(media.file_name || item.title || "Видео")}</span>
         <button class="video-close" data-video-action="close" aria-label="Свернуть плеер">×</button>
         <button class="video-big-play" data-video-action="toggle" aria-label="Воспроизвести видео">▶</button>
         <span class="video-buffering" aria-hidden="true"></span>
