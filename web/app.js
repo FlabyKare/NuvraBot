@@ -13,6 +13,10 @@ const categoryNames = Object.fromEntries([
   ["inbox", "Без категории"],
   ...categories.map((category) => [category.id, category.label]),
 ]);
+const pickerCategories = [
+  { id: "inbox", label: "Без категории", icon: "🧠" },
+  ...categories,
+];
 
 const state = {
   category: null,
@@ -237,9 +241,12 @@ function renderItem(item) {
   return `
     <article class="item-card ${item.read ? "read" : ""}" data-item-id="${item.id}">
       <div class="item-top">
-        <span class="category-chip">${escapeHtml(categoryNames[item.category] || "Без категории")}</span>
+        <button class="category-chip" data-action="category" aria-expanded="false">
+          ${escapeHtml(categoryNames[item.category] || "Без категории")} <span aria-hidden="true">⌄</span>
+        </button>
         <button class="favorite-button ${item.favorite ? "active" : ""}" data-action="favorite" aria-label="Избранное">${item.favorite ? "★" : "☆"}</button>
       </div>
+      ${renderCategoryPicker(item)}
       ${titleElement}
       ${media}
       ${excerpt}
@@ -253,10 +260,30 @@ function renderItem(item) {
         <button class="action-button" data-action="read">${item.read ? "↩ Не прочитано" : "✓ Прочитано"}</button>
         <button class="action-button" data-action="tomorrow">⏰ Завтра</button>
         <button class="action-button" data-action="month">Через месяц</button>
+        ${item.reminder_at ? '<button class="action-button reminder-cancel" data-action="cancel-reminder">🔕 Отменить</button>' : ""}
+        <button class="action-button" data-action="category">📂 Категория</button>
         <button class="action-button" data-action="summary">✨ Кратко</button>
         <button class="action-button danger" data-action="delete">Удалить</button>
       </div>
     </article>`;
+}
+
+function renderCategoryPicker(item) {
+  return `
+    <div class="category-picker" data-category-picker hidden>
+      <span class="category-picker-title">Переместить в категорию</span>
+      <div class="category-options">
+        ${pickerCategories.map((category) => `
+          <button
+            class="category-option ${item.category === category.id ? "active" : ""}"
+            data-action="category-choice"
+            data-category-value="${category.id}"
+          >
+            <span>${category.icon}</span>${category.label}${item.category === category.id ? " ✓" : ""}
+          </button>
+        `).join("")}
+      </div>
+    </div>`;
 }
 
 function renderMediaLauncher(item) {
@@ -305,6 +332,21 @@ async function handleItemAction(event) {
       const date = new Date();
       date.setDate(date.getDate() + (action === "tomorrow" ? 1 : 30));
       await updateItem(itemId, { reminder_at: date.toISOString() }, "Напоминание поставлено");
+    } else if (action === "cancel-reminder") {
+      await updateItem(itemId, { clear_reminder: true }, "Напоминание отменено");
+    } else if (action === "category") {
+      const picker = card.querySelector("[data-category-picker]");
+      if (picker) {
+        const willOpen = picker.hidden;
+        picker.hidden = !willOpen;
+        card.querySelectorAll('[data-action="category"]').forEach((trigger) => {
+          trigger.setAttribute("aria-expanded", String(willOpen));
+        });
+      }
+    } else if (action === "category-choice") {
+      const category = button.dataset.categoryValue;
+      if (!categoryNames[category]) throw new Error("Неизвестная категория");
+      await updateItem(itemId, { category }, `Перемещено: ${categoryNames[category]}`);
     } else if (action === "summary") {
       showToast("Готовлю краткое содержание…");
       const updated = await api(`/api/items/${itemId}/summary`, { method: "POST" });

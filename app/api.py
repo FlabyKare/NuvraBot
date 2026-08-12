@@ -43,6 +43,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
+        if app_settings.app_env.lower() == "production" and not app_settings.storage_persistent:
+            logger.critical(
+                "Persistent storage is not configured. Attach a Railway Volume at /app/data; "
+                "otherwise SQLite data will be lost on redeploy."
+            )
         await db.init()
         tasks: list[asyncio.Task[object]] = []
         bot = None
@@ -124,6 +129,8 @@ def create_app(
             "status": "ok",
             "bot_enabled": bool(app_settings.run_bot and app_settings.telegram_bot_token),
             "ai_enabled": ai.enabled,
+            "storage": "sqlite",
+            "storage_persistent": app_settings.storage_persistent,
         }
 
     @app.get("/api/me")

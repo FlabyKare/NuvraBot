@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     public_url: str = ""
-    database_path: Path = BASE_DIR / "data" / "second_brain.sqlite3"
+    database_path: Path = Path("data/second_brain.sqlite3")
+    railway_volume_mount_path: Path | None = None
 
     telegram_bot_token: str = ""
     run_bot: bool = True
@@ -48,11 +49,15 @@ class Settings(BaseSettings):
             normalized = f"https://{normalized.lstrip('/')}"
         return normalized
 
-    @field_validator("database_path", mode="before")
-    @classmethod
-    def resolve_database_path(cls, value: str | Path) -> Path:
-        path = Path(value)
-        return path if path.is_absolute() else BASE_DIR / path
+    @model_validator(mode="after")
+    def resolve_database_storage(self) -> Settings:
+        path = self.database_path
+        if self.railway_volume_mount_path and not path.is_absolute():
+            path = self.railway_volume_mount_path / path.name
+        elif not path.is_absolute():
+            path = BASE_DIR / path
+        self.database_path = path.resolve()
+        return self
 
     @property
     def ai_enabled(self) -> bool:
@@ -61,6 +66,16 @@ class Settings(BaseSettings):
     @property
     def mini_app_url(self) -> str:
         return self.public_url
+
+    @property
+    def storage_persistent(self) -> bool:
+        if not self.railway_volume_mount_path:
+            return self.app_env.lower() != "production"
+        try:
+            self.database_path.relative_to(self.railway_volume_mount_path.resolve())
+        except ValueError:
+            return False
+        return True
 
 
 @lru_cache(maxsize=1)

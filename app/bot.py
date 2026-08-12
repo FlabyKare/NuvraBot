@@ -91,7 +91,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         await message.answer(
             "<b>Как пользоваться</b>\n\n"
             "1. Перешли сюда любое сообщение или файл.\n"
-            "2. Нажми ⭐, ✅ или поставь напоминание.\n"
+            "2. Выбери категорию, нажми ⭐, ✅ или поставь напоминание.\n"
             "3. Используй <code>/search запрос</code> или открой Mini App.\n\n"
             "AI-функции включаются автоматически, если на сервере задан OPENAI_API_KEY."
         )
@@ -244,6 +244,19 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
                 ItemPatch(reminder_at=datetime.now(UTC) + delta),
             )
             notice = "Напомню завтра" if action == "tomorrow" else "Напомню через месяц"
+        elif action == "cancel":
+            item = await database.patch_item(user_id, item_id, ItemPatch(clear_reminder=True))
+            notice = "Напоминание отменено"
+        elif action == "category":
+            await callback.answer("Выбери категорию")
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=category_keyboard(item))
+            return
+        elif action == "back":
+            await callback.answer()
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
+            return
         elif action == "summary":
             await callback.answer("Готовлю краткое содержание…")
             summary = await ai.summarize(f"{item['title']}\n{item['text']}")
@@ -261,6 +274,34 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
                 await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
             except Exception:
                 logger.debug("Unable to refresh inline keyboard", exc_info=True)
+
+    @router.callback_query(F.data.startswith("itemcat:"))
+    async def choose_item_category(callback: CallbackQuery) -> None:
+        if not callback.from_user or not callback.data:
+            return
+        try:
+            _, category, raw_id = callback.data.split(":", 2)
+            item_id = int(raw_id)
+        except (ValueError, TypeError):
+            await callback.answer("Некорректная категория", show_alert=True)
+            return
+        if category not in CATEGORY_LABELS:
+            await callback.answer("Неизвестная категория", show_alert=True)
+            return
+        item = await database.patch_item(
+            callback.from_user.id,
+            item_id,
+            ItemPatch(category=category),
+        )
+        if not item:
+            await callback.answer("Сохранение не найдено", show_alert=True)
+            return
+        await callback.answer(f"Категория: {CATEGORY_LABELS[category]}")
+        if callback.message:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=item_keyboard(item))
+            except Exception:
+                logger.debug("Unable to refresh category keyboard", exc_info=True)
 
     @router.message()
     async def save_message(message: Message) -> None:
@@ -401,8 +442,7 @@ def mini_app_keyboard(settings: Settings) -> InlineKeyboardMarkup | None:
 
 def item_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
     item_id = item["id"]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
             [
                 InlineKeyboardButton(
                     text="★ В избранном" if item.get("favorite") else "☆ В избранное",
@@ -417,9 +457,38 @@ def item_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⏰ Завтра", callback_data=f"item:tomorrow:{item_id}"),
                 InlineKeyboardButton(text="🗓 Через месяц", callback_data=f"item:month:{item_id}"),
             ],
+        ]
+    if item.get("reminder_at"):
+        rows.append(
+            [InlineKeyboardButton(text="🔕 Отменить напоминание", callback_data=f"item:cancel:{item_id}")]
+        )
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text=f"📂 Категория · {CATEGORY_LABELS.get(item.get('category'), 'Без категории')}",
+                    callback_data=f"item:category:{item_id}",
+                )
+            ],
             [InlineKeyboardButton(text="✨ Суммаризировать", callback_data=f"item:summary:{item_id}")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def category_keyboard(item: dict[str, Any]) -> InlineKeyboardMarkup:
+    item_id = item["id"]
+    current = item.get("category")
+    buttons = [
+        InlineKeyboardButton(
+            text=f"{'✓ ' if category == current else ''}{label}",
+            callback_data=f"itemcat:{category}:{item_id}",
+        )
+        for category, label in CATEGORY_LABELS.items()
+    ]
+    rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"item:back:{item_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def reminder_worker(bot: Bot, database: Database, poll_seconds: int) -> None:

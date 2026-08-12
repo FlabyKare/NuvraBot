@@ -397,6 +397,7 @@ h3 {
 .items {
   position: relative;
   display: grid;
+  min-width: 0;
   gap: 10px;
 }
 
@@ -419,6 +420,8 @@ h3 {
 }
 
 .item-card {
+  min-width: 0;
+  max-width: 100%;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -438,12 +441,68 @@ h3 {
 }
 
 .category-chip {
+  border: 0;
   padding: 6px 9px;
   border-radius: 8px;
   background: rgba(146, 117, 255, 0.12);
   color: #b9a8ff;
   font-size: 10px;
   font-weight: 700;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.category-chip:hover,
+.category-chip[aria-expanded="true"] {
+  background: rgba(146, 117, 255, 0.22);
+  color: #d4caff;
+}
+
+.category-picker {
+  margin: -3px 0 14px;
+  padding: 12px;
+  border: 1px solid rgba(146, 117, 255, 0.18);
+  border-radius: 14px;
+  background: rgba(16, 18, 25, 0.92);
+}
+
+.category-picker[hidden] {
+  display: none;
+}
+
+.category-picker-title {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.category-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.category-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #afb5c2;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.category-option:hover,
+.category-option.active {
+  border-color: rgba(200, 255, 98, 0.2);
+  background: rgba(200, 255, 98, 0.08);
+  color: var(--text);
 }
 
 .favorite-button {
@@ -807,6 +866,8 @@ h3 {
 }
 
 .item-actions {
+  min-width: 0;
+  max-width: 100%;
   gap: 7px;
   padding: 12px 2px 6px 0;
   border-top: 1px solid var(--line);
@@ -872,6 +933,10 @@ h3 {
 .action-button.danger {
   margin-left: auto;
   color: #ba8080;
+}
+
+.action-button.reminder-cancel {
+  color: #ffc083;
 }
 
 .empty-state,

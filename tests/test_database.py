@@ -54,6 +54,18 @@ async def test_item_lifecycle_and_stats(database: Database) -> None:
     assert updated and updated["favorite"] is True
     assert updated["read"] is True
 
+    reminder = datetime.now(UTC) + timedelta(days=1)
+    updated = await database.patch_item(
+        101,
+        saved["id"],
+        ItemPatch(category="read", reminder_at=reminder),
+    )
+    assert updated and updated["category"] == "read"
+    assert updated["reminder_at"] is not None
+
+    updated = await database.patch_item(101, saved["id"], ItemPatch(clear_reminder=True))
+    assert updated and updated["reminder_at"] is None
+
     assert await database.delete_item(101, saved["id"]) is True
     assert (await database.stats(101))["total"] == 1
 
