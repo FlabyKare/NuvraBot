@@ -648,6 +648,65 @@ h3 {
   text-decoration: none;
 }
 
+.video-topic {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.video-topic span {
+  margin-left: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+.video-topic:hover span,
+.video-topic:focus-visible span {
+  color: var(--lime);
+  opacity: 1;
+}
+
+.video-topic-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 6px;
+  margin: -1px 0 12px;
+}
+
+.video-topic-editor[hidden] {
+  display: none;
+}
+
+.video-topic-editor input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(200, 255, 98, 0.28);
+  border-radius: 10px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.video-topic-editor button {
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(200, 255, 98, 0.1);
+  color: var(--lime);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.video-topic-editor button:last-child {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+}
+
 .item-media-slot {
   margin: 2px 0 14px;
 }

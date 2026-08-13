@@ -86,6 +86,21 @@ def test_health_and_dev_auth(tmp_path) -> None:
         assert moved.status_code == 200
         assert moved.json()["category"] == custom_category["id"]
 
+        renamed_item = client.patch(
+            f"/api/items/{saved['id']}",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"title": "Гайд по монтажу"},
+        )
+        assert renamed_item.status_code == 200
+        assert renamed_item.json()["title"] == "Гайд по монтажу"
+
+        empty_title = client.patch(
+            f"/api/items/{saved['id']}",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"title": "   "},
+        )
+        assert empty_title.status_code == 422
+
 
 def test_media_signature_is_scoped_to_user_and_item() -> None:
     signature = media_signature("secret", telegram_id=77, item_id=12, expires=123456)

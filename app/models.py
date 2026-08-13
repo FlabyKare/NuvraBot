@@ -53,11 +53,17 @@ class NewItem(BaseModel):
 
 
 class ItemPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
     favorite: bool | None = None
     read: bool | None = None
     category: Category | None = None
     reminder_at: datetime | None = None
     clear_reminder: bool = False
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def strip_title(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ItemView(BaseModel):

@@ -91,7 +91,12 @@ async function bootstrap() {
 function bindEvents() {
   elements.searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    runSearch(elements.searchInput.value.trim());
+    submitSearch();
+  });
+  elements.searchInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submitSearch();
   });
   elements.searchInput.addEventListener("input", () => {
     const query = elements.searchInput.value.trim();
@@ -128,6 +133,7 @@ function bindEvents() {
     loadItems();
   });
   elements.itemsList.addEventListener("click", handleItemAction);
+  elements.itemsList.addEventListener("submit", handleTitleSubmit);
   elements.itemsList.addEventListener("click", handleVideoAction);
   elements.itemsList.addEventListener("input", handleVideoSeek);
   elements.itemsList.addEventListener("wheel", handleActionsWheel, { passive: false });
@@ -136,6 +142,16 @@ function bindEvents() {
   elements.itemsList.addEventListener("pointerup", endActionDrag);
   elements.itemsList.addEventListener("pointercancel", endActionDrag);
   elements.itemsList.addEventListener("keydown", handleActionsKeydown);
+}
+
+function submitSearch() {
+  clearTimeout(state.searchTimer);
+  const query = elements.searchInput.value.trim();
+  elements.searchInput.blur();
+  requestAnimationFrame(() => {
+    if (document.activeElement === elements.searchInput) elements.searchInput.blur();
+  });
+  runSearch(query);
 }
 
 async function loadMe() {
@@ -314,11 +330,14 @@ function renderItems() {
 function renderItem(item) {
   const title = escapeHtml(item.title);
   const filenameTitle = item.kind === "video" && item.file_name && item.title === item.file_name;
-  const titleElement = filenameTitle
+  const editableVideoTitle = item.kind === "video"
+    ? `<button class="item-title video-topic" data-action="edit-title" aria-label="Изменить тему видео">${title}<span aria-hidden="true">✎</span></button>`
+    : "";
+  const titleElement = editableVideoTitle || (filenameTitle
     ? ""
     : item.url
     ? `<a class="item-title" href="${escapeAttribute(item.url)}" target="_blank" rel="noopener">${title}</a>`
-    : `<span class="item-title">${title}</span>`;
+    : `<span class="item-title">${title}</span>`);
   const excerpt = item.text && item.text !== item.title
     ? `<p class="item-excerpt">${escapeHtml(item.text)}</p>`
     : "";
@@ -340,6 +359,7 @@ function renderItem(item) {
       </div>
       ${renderCategoryPicker(item)}
       ${titleElement}
+      ${item.kind === "video" ? renderTitleEditor(item) : ""}
       ${media}
       ${excerpt}
       ${summary}
@@ -354,10 +374,26 @@ function renderItem(item) {
         <button class="action-button" data-action="month">Через месяц</button>
         ${item.reminder_at ? '<button class="action-button reminder-cancel" data-action="cancel-reminder">🔕 Отменить</button>' : ""}
         <button class="action-button" data-action="category">📂 Категория</button>
+        ${item.kind === "video" ? '<button class="action-button" data-action="edit-title">✎ Тема</button>' : ""}
         <button class="action-button" data-action="summary">${state.aiEnabled ? "✨ AI-кратко" : "✨ Кратко"}</button>
         <button class="action-button danger" data-action="delete">Удалить</button>
       </div>
     </article>`;
+}
+
+function renderTitleEditor(item) {
+  return `
+    <form class="video-topic-editor" data-title-editor hidden>
+      <input
+        value="${escapeAttribute(item.title === "Видео" ? "" : item.title)}"
+        maxlength="300"
+        placeholder="Например, Моменталка на банан"
+        aria-label="Название темы видео"
+        required
+      />
+      <button type="submit">Сохранить</button>
+      <button type="button" data-action="cancel-title">Отмена</button>
+    </form>`;
 }
 
 function renderCategoryPicker(item) {
@@ -442,6 +478,15 @@ async function handleItemAction(event) {
       const category = button.dataset.categoryValue;
       if (!categoryById(category)) throw new Error("Неизвестная категория");
       await updateItem(itemId, { category }, `Перемещено: ${categoryName(category)}`);
+    } else if (action === "edit-title") {
+      const editor = card.querySelector("[data-title-editor]");
+      if (editor) {
+        editor.hidden = false;
+        editor.querySelector("input")?.focus();
+      }
+    } else if (action === "cancel-title") {
+      const editor = card.querySelector("[data-title-editor]");
+      if (editor) editor.hidden = true;
     } else if (action === "summary") {
       showToast(state.aiEnabled ? "AI готовит краткое содержание…" : "Готовлю краткое содержание…");
       const updated = await api(`/api/items/${itemId}/summary`, { method: "POST" });
@@ -462,6 +507,29 @@ async function handleItemAction(event) {
     showToast(error.message);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function handleTitleSubmit(event) {
+  const editor = event.target.closest("[data-title-editor]");
+  const card = event.target.closest("[data-item-id]");
+  if (!editor || !card) return;
+  event.preventDefault();
+  const input = editor.querySelector("input");
+  const submit = editor.querySelector('button[type="submit"]');
+  const title = input?.value.trim() || "";
+  if (!title) {
+    showToast("Название не может быть пустым");
+    return;
+  }
+  try {
+    submit.disabled = true;
+    input.blur();
+    await updateItem(Number(card.dataset.itemId), { title }, "Название видео обновлено");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    submit.disabled = false;
   }
 }
 

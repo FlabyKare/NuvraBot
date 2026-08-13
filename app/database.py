@@ -150,6 +150,11 @@ class Database:
                 UNIQUE(user_id, name)
             );
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration_key TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_items_user_created
                 ON items(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_items_user_category
@@ -190,13 +195,7 @@ class Database:
             )
         except aiosqlite.OperationalError:
             self.fts_enabled = False
-        await self.conn.execute(
-            """
-            UPDATE items SET title = 'Видео', updated_at = ?
-            WHERE kind = 'video' AND file_name IS NOT NULL AND title = file_name
-            """,
-            (to_iso(),),
-        )
+        await self._migrate_video_titles()
         now = to_iso()
         for category in DEFAULT_CATEGORIES:
             await self.conn.execute(
@@ -216,6 +215,38 @@ class Database:
                 ),
             )
         await self.conn.commit()
+
+    async def _migrate_video_titles(self) -> None:
+        migration_key = "video_topics_from_captions_v1"
+        applied = await (
+            await self.conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE migration_key = ?",
+                (migration_key,),
+            )
+        ).fetchone()
+        if applied:
+            return
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT id, title, text, file_name FROM items
+                WHERE kind = 'video'
+                  AND (title = 'Видео' OR (file_name IS NOT NULL AND title = file_name))
+                """
+            )
+        ).fetchall()
+        now = to_iso()
+        for row in rows:
+            lines = [line.strip() for line in (row["text"] or "").splitlines() if line.strip()]
+            topic = lines[0][:300] if lines else "Видео"
+            await self.conn.execute(
+                "UPDATE items SET title = ?, updated_at = ? WHERE id = ?",
+                (topic, now, row["id"]),
+            )
+        await self.conn.execute(
+            "INSERT INTO schema_migrations(migration_key, applied_at) VALUES (?, ?)",
+            (migration_key, now),
+        )
 
     async def close(self) -> None:
         if self.connection is not None:
@@ -624,6 +655,9 @@ class Database:
         updates: list[str] = []
         params: list[Any] = []
         fields_set = patch.model_fields_set
+        if "title" in fields_set and patch.title:
+            updates.append("title = ?")
+            params.append(patch.title)
         if "favorite" in fields_set and patch.favorite is not None:
             updates.append("favorite = ?")
             params.append(int(patch.favorite))
