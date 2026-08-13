@@ -101,6 +101,38 @@ def test_health_and_dev_auth(tmp_path) -> None:
         )
         assert empty_title.status_code == 422
 
+        bulk = client.post(
+            "/api/bulk/items",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"item_ids": [saved["id"]], "operation": "favorite"},
+        )
+        assert bulk.status_code == 200
+        assert bulk.json()["affected"] == 1
+
+        reminder = client.post(
+            f"/api/items/{saved['id']}/reminder",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"text": "завтра в 19:00", "timezone_offset_minutes": 180},
+        )
+        assert reminder.status_code == 200
+        assert reminder.json()["reminder_at"]
+
+        wrong_delete = client.request(
+            "DELETE",
+            "/api/account",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"confirmation": "нет"},
+        )
+        assert wrong_delete.status_code == 422
+
+        deleted = client.request(
+            "DELETE",
+            "/api/account",
+            headers={"X-Dev-Telegram-User": "77"},
+            json={"confirmation": "УДАЛИТЬ"},
+        )
+        assert deleted.status_code == 204
+
 
 def test_media_signature_is_scoped_to_user_and_item() -> None:
     signature = media_signature("secret", telegram_id=77, item_id=12, expires=123456)

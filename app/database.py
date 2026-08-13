@@ -128,6 +128,9 @@ class Database:
                 raw_json TEXT,
                 embedding TEXT,
                 summary TEXT,
+                recognized_text TEXT,
+                recognition_kind TEXT,
+                recognized_at TEXT,
                 favorite INTEGER NOT NULL DEFAULT 0,
                 read_at TEXT,
                 reminder_at TEXT,
@@ -163,12 +166,19 @@ class Database:
                 ON items(reminder_at, reminder_sent_at);
             """
         )
+        await self._ensure_item_columns()
         try:
             await self.conn.executescript(
                 """
+                DROP TRIGGER IF EXISTS items_ai;
+                DROP TRIGGER IF EXISTS items_ad;
+                DROP TRIGGER IF EXISTS items_au;
+                DROP TABLE IF EXISTS items_fts;
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
                     title,
                     text,
+                    recognized_text,
                     url,
                     source_chat,
                     category,
@@ -178,19 +188,35 @@ class Database:
                 );
 
                 CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
-                    INSERT INTO items_fts(rowid, title, text, url, source_chat, category)
-                    VALUES (new.id, new.title, new.text, new.url, new.source_chat, new.category);
+                    INSERT INTO items_fts(rowid, title, text, recognized_text, url, source_chat, category)
+                    VALUES (
+                        new.id, new.title, new.text, new.recognized_text,
+                        new.url, new.source_chat, new.category
+                    );
                 END;
                 CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
-                    INSERT INTO items_fts(items_fts, rowid, title, text, url, source_chat, category)
-                    VALUES ('delete', old.id, old.title, old.text, old.url, old.source_chat, old.category);
+                    INSERT INTO items_fts(
+                        items_fts, rowid, title, text, recognized_text, url, source_chat, category
+                    ) VALUES (
+                        'delete', old.id, old.title, old.text, old.recognized_text,
+                        old.url, old.source_chat, old.category
+                    );
                 END;
                 CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
-                    INSERT INTO items_fts(items_fts, rowid, title, text, url, source_chat, category)
-                    VALUES ('delete', old.id, old.title, old.text, old.url, old.source_chat, old.category);
-                    INSERT INTO items_fts(rowid, title, text, url, source_chat, category)
-                    VALUES (new.id, new.title, new.text, new.url, new.source_chat, new.category);
+                    INSERT INTO items_fts(
+                        items_fts, rowid, title, text, recognized_text, url, source_chat, category
+                    ) VALUES (
+                        'delete', old.id, old.title, old.text, old.recognized_text,
+                        old.url, old.source_chat, old.category
+                    );
+                    INSERT INTO items_fts(rowid, title, text, recognized_text, url, source_chat, category)
+                    VALUES (
+                        new.id, new.title, new.text, new.recognized_text,
+                        new.url, new.source_chat, new.category
+                    );
                 END;
+
+                INSERT INTO items_fts(items_fts) VALUES ('rebuild');
                 """
             )
         except aiosqlite.OperationalError:
@@ -215,6 +241,13 @@ class Database:
                 ),
             )
         await self.conn.commit()
+
+    async def _ensure_item_columns(self) -> None:
+        rows = await (await self.conn.execute("PRAGMA table_info(items)")).fetchall()
+        existing = {row["name"] for row in rows}
+        for name in ("recognized_text", "recognition_kind", "recognized_at"):
+            if name not in existing:
+                await self.conn.execute(f"ALTER TABLE items ADD COLUMN {name} TEXT")
 
     async def _migrate_video_titles(self) -> None:
         migration_key = "video_topics_from_captions_v1"
@@ -470,6 +503,19 @@ class Database:
             await self.conn.commit()
         return cursor.rowcount > 0
 
+    async def latest_subscription_charge(self, telegram_id: int) -> str | None:
+        row = await self._fetchone(
+            """
+            SELECT payments.telegram_payment_charge_id
+            FROM payments JOIN users ON users.id = payments.user_id
+            WHERE users.telegram_id = ?
+            ORDER BY payments.created_at DESC, payments.id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        return str(row["telegram_payment_charge_id"]) if row else None
+
     async def create_item(
         self,
         telegram_id: int,
@@ -585,7 +631,7 @@ class Database:
             try:
                 rows = await self._fetchall(
                     """
-                    SELECT items.*, bm25(items_fts, 5.0, 2.0, 1.0, 1.0, 0.5) AS fts_rank
+                    SELECT items.*, bm25(items_fts, 5.0, 2.0, 2.0, 1.0, 1.0, 0.5) AS fts_rank
                     FROM items_fts
                     JOIN items ON items.id = items_fts.rowid
                     JOIN users ON users.id = items.user_id
@@ -600,7 +646,8 @@ class Database:
                 pass
 
         searchable = (
-            "lower(items.title || ' ' || items.text || ' ' || COALESCE(items.url, '') || ' ' || "
+            "lower(items.title || ' ' || items.text || ' ' || "
+            "COALESCE(items.recognized_text, '') || ' ' || COALESCE(items.url, '') || ' ' || "
             "COALESCE(items.file_name, '') || ' ' || COALESCE(items.source_chat, ''))"
         )
         like_conditions = " OR ".join(f"{searchable} LIKE ?" for _ in terms[:12])
@@ -688,6 +735,101 @@ class Database:
             await self.conn.commit()
         return await self.get_item(telegram_id, item_id)
 
+    async def set_recognition(
+        self,
+        telegram_id: int,
+        item_id: int,
+        text: str,
+        kind: str,
+        *,
+        embedding: list[float] | None = None,
+    ) -> dict[str, Any] | None:
+        cleaned = text.strip()
+        async with self._write_lock:
+            await self.conn.execute(
+                """
+                UPDATE items SET recognized_text = ?, recognition_kind = ?, recognized_at = ?,
+                                 embedding = COALESCE(?, embedding), updated_at = ?
+                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?) AND id = ?
+                """,
+                (
+                    cleaned,
+                    kind,
+                    to_iso(),
+                    json.dumps(embedding) if embedding else None,
+                    to_iso(),
+                    telegram_id,
+                    item_id,
+                ),
+            )
+            await self.conn.commit()
+        return await self.get_item(telegram_id, item_id)
+
+    async def bulk_patch_items(
+        self,
+        telegram_id: int,
+        item_ids: list[int],
+        *,
+        favorite: bool | None = None,
+        read: bool | None = None,
+        category: str | None = None,
+        reminder_at: datetime | None = None,
+        clear_reminder: bool = False,
+    ) -> int:
+        unique_ids = list(dict.fromkeys(item_ids))
+        if not unique_ids:
+            return 0
+        updates: list[str] = []
+        params: list[Any] = []
+        if favorite is not None:
+            updates.append("favorite = ?")
+            params.append(int(favorite))
+        if read is not None:
+            updates.append("read_at = ?")
+            params.append(to_iso() if read else None)
+        if category:
+            updates.append("category = ?")
+            params.append(category)
+        if clear_reminder:
+            updates.extend(["reminder_at = NULL", "reminder_sent_at = NULL"])
+        elif reminder_at is not None:
+            updates.extend(["reminder_at = ?", "reminder_sent_at = NULL"])
+            params.append(to_iso(reminder_at))
+        if not updates:
+            return 0
+        updates.append("updated_at = ?")
+        params.append(to_iso())
+        placeholders = ",".join("?" for _ in unique_ids)
+        params.extend([telegram_id, *unique_ids])
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                f"""
+                UPDATE items SET {', '.join(updates)}
+                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                  AND id IN ({placeholders})
+                """,
+                tuple(params),
+            )
+            await self.conn.commit()
+        return cursor.rowcount
+
+    async def bulk_delete_items(self, telegram_id: int, item_ids: list[int]) -> int:
+        unique_ids = list(dict.fromkeys(item_ids))
+        if not unique_ids:
+            return 0
+        placeholders = ",".join("?" for _ in unique_ids)
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                f"""
+                DELETE FROM items
+                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                  AND id IN ({placeholders})
+                """,
+                (telegram_id, *unique_ids),
+            )
+            await self.conn.commit()
+        return cursor.rowcount
+
     async def set_summary(self, telegram_id: int, item_id: int, summary: str) -> dict[str, Any] | None:
         async with self._write_lock:
             await self.conn.execute(
@@ -709,6 +851,12 @@ class Database:
                 """,
                 (telegram_id, item_id),
             )
+            await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def delete_user_data(self, telegram_id: int) -> bool:
+        async with self._write_lock:
+            cursor = await self.conn.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
             await self.conn.commit()
         return cursor.rowcount > 0
 
@@ -764,6 +912,9 @@ class Database:
             "favorite": bool(values["favorite"]),
             "read": values["read_at"] is not None,
             "summary": values["summary"],
+            "recognized_text": values.get("recognized_text"),
+            "recognition_kind": values.get("recognition_kind"),
+            "recognized_at": values.get("recognized_at"),
             "reminder_at": values["reminder_at"],
             "created_at": values["created_at"],
             "score": score,

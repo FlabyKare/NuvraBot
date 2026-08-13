@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0d12" />
     <title>Second Brain</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260812-categories" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260813-smart-tools" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="/static/app.js?v=20260813-video-topics" defer></script>
+    <script src="/static/app.js?v=20260813-smart-tools" defer></script>
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -78,13 +78,34 @@
             <p class="eyebrow" id="resultsLabel">ПОСЛЕДНИЕ</p>
             <h3 id="libraryTitle">Сохранения</h3>
           </div>
-          <button class="icon-button" id="refreshButton" aria-label="Обновить">↻</button>
+          <div class="library-tools">
+            <button class="select-mode-button" id="selectModeButton" type="button">Выбрать</button>
+            <button class="icon-button" id="refreshButton" aria-label="Обновить">↻</button>
+          </div>
         </div>
 
         <div class="filter-row" id="filterRow">
           <button class="filter active" data-filter="all">Все</button>
           <button class="filter" data-filter="favorites">★ Избранное</button>
           <button class="filter" data-filter="unread">Непрочитанные</button>
+        </div>
+
+        <div class="bulk-bar" id="bulkBar" hidden>
+          <div class="bulk-summary">
+            <b><span id="bulkCount">0</span> выбрано</b>
+            <button type="button" id="selectAllButton">Выбрать все</button>
+            <button type="button" id="cancelSelectionButton">Отмена</button>
+          </div>
+          <div class="bulk-actions">
+            <button type="button" data-bulk-action="mark_read">✓ Прочитано</button>
+            <button type="button" data-bulk-action="mark_unread">↩ Не прочитано</button>
+            <button type="button" data-bulk-action="favorite">★ В избранное</button>
+            <button type="button" data-bulk-action="unfavorite">☆ Убрать избранное</button>
+            <button type="button" data-bulk-action="move">📂 Категория</button>
+            <button type="button" data-bulk-action="remind">⏰ Напомнить</button>
+            <button type="button" data-bulk-action="clear_reminder">🔕 Отменить напоминания</button>
+            <button type="button" data-bulk-action="delete" class="danger">Удалить</button>
+          </div>
         </div>
 
         <div class="items" id="itemsList" aria-live="polite">
@@ -97,9 +118,42 @@
 
       <footer>
         <span>Перешли сообщение боту — и оно появится здесь.</span>
+        <button class="privacy-button" id="privacyButton" type="button">Приватность и данные</button>
       </footer>
     </main>
 
     <div class="toast" id="toast" role="status"></div>
+
+    <div class="modal-backdrop" id="smartReminderModal" hidden>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="smartReminderTitle">
+        <button class="modal-close" type="button" data-close-modal="smartReminderModal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">УМНОЕ НАПОМИНАНИЕ</p>
+        <h3 id="smartReminderTitle">Когда напомнить?</h3>
+        <p class="modal-copy">Напиши обычной фразой: «завтра в 19:00», «через две недели» или «25 августа утром».</p>
+        <form id="smartReminderForm" class="modal-form">
+          <input id="smartReminderInput" maxlength="160" placeholder="Например, в пятницу вечером" required />
+          <button type="submit">Поставить напоминание</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="bulkCategoryModal" hidden>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="bulkCategoryTitle">
+        <button class="modal-close" type="button" data-close-modal="bulkCategoryModal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">МАССОВОЕ ДЕЙСТВИЕ</p>
+        <h3 id="bulkCategoryTitle">Выбери категорию</h3>
+        <div class="modal-category-grid" id="bulkCategoryList"></div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="privacyModal" hidden>
+      <section class="modal-card privacy-card" role="dialog" aria-modal="true" aria-labelledby="privacyTitle">
+        <button class="modal-close" type="button" data-close-modal="privacyModal" aria-label="Закрыть">×</button>
+        <p class="eyebrow">ПРИВАТНОСТЬ</p>
+        <h3 id="privacyTitle">Твои данные</h3>
+        <p class="modal-copy">Сохранения доступны только твоему Telegram-аккаунту. Полное удаление сотрёт профиль, карточки, категории, напоминания и историю платежей без возможности восстановления.</p>
+        <button class="delete-account-button" id="deleteAccountButton" type="button">Удалить все мои данные</button>
+      </section>
+    </div>
   </body>
 </html>

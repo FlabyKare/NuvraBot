@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import io
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -19,7 +20,16 @@ from .ai_service import AIService
 from .bot import configure_bot, create_bot, create_dispatcher, reminder_worker
 from .config import BASE_DIR, Settings, get_settings
 from .database import Database
-from .models import CategoryCreate, CategoryPatch, ItemPatch, TelegramUser
+from .models import (
+    BulkItemsRequest,
+    CategoryCreate,
+    CategoryPatch,
+    DeleteAccountRequest,
+    ItemPatch,
+    SmartReminderRequest,
+    TelegramUser,
+)
+from .reminders import parse_smart_reminder
 from .telegram_auth import TelegramAuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -316,6 +326,132 @@ def create_app(
             raise HTTPException(status_code=404, detail="Item not found")
         return item
 
+    @app.post("/api/items/{item_id}/reminder")
+    async def smart_reminder(
+        item_id: int,
+        reminder: SmartReminderRequest,
+        user: UserDependency,
+    ) -> dict[str, object]:
+        if not await db.get_item(user.id, item_id):
+            raise HTTPException(status_code=404, detail="Сохранение не найдено")
+        try:
+            reminder_at = parse_smart_reminder(
+                reminder.text,
+                timezone_offset_minutes=reminder.timezone_offset_minutes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        item = await db.patch_item(user.id, item_id, ItemPatch(reminder_at=reminder_at))
+        if not item:
+            raise HTTPException(status_code=404, detail="Сохранение не найдено")
+        return item
+
+    @app.post("/api/bulk/items")
+    async def bulk_items(payload: BulkItemsRequest, user: UserDependency) -> dict[str, object]:
+        operation = payload.operation
+        if operation == "move":
+            if not payload.category:
+                raise HTTPException(status_code=422, detail="Выбери категорию")
+            if not await db.has_category(user.id, payload.category):
+                raise HTTPException(status_code=400, detail="Неизвестная категория")
+            affected = await db.bulk_patch_items(user.id, payload.item_ids, category=payload.category)
+        elif operation == "remind":
+            if not payload.reminder_text:
+                raise HTTPException(status_code=422, detail="Напиши, когда напомнить")
+            try:
+                reminder_at = parse_smart_reminder(
+                    payload.reminder_text,
+                    timezone_offset_minutes=payload.timezone_offset_minutes,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            affected = await db.bulk_patch_items(user.id, payload.item_ids, reminder_at=reminder_at)
+        elif operation == "delete":
+            affected = await db.bulk_delete_items(user.id, payload.item_ids)
+        else:
+            patches = {
+                "mark_read": {"read": True},
+                "mark_unread": {"read": False},
+                "favorite": {"favorite": True},
+                "unfavorite": {"favorite": False},
+                "clear_reminder": {"clear_reminder": True},
+            }
+            affected = await db.bulk_patch_items(user.id, payload.item_ids, **patches[operation])
+        return {"affected": affected, "operation": operation}
+
+    @app.post("/api/items/{item_id}/recognize")
+    async def recognize_item(item_id: int, user: UserDependency) -> dict[str, object]:
+        item = await db.get_media_item(user.id, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="У этого сохранения нет доступного файла")
+        kind = item["kind"]
+        mime_type = item["mime_type"] or "application/octet-stream"
+        needs_openai = kind in {"photo", "audio", "voice", "video"} or mime_type.startswith(
+            ("image/", "audio/", "video/")
+        )
+        if needs_openai and not ai.enabled:
+            raise HTTPException(status_code=503, detail="Для OCR и расшифровки подключи и пополни OpenAI API")
+        bot = app.state.bot
+        temporary_bot = None
+        if bot is None:
+            temporary_bot = create_bot(app_settings)
+            bot = temporary_bot
+        try:
+            telegram_file = await bot.get_file(item["telegram_file_id"])
+            if not telegram_file.file_path:
+                raise HTTPException(status_code=404, detail="Telegram больше не хранит этот файл")
+            buffer = io.BytesIO()
+            await bot.download_file(telegram_file.file_path, destination=buffer)
+            content = buffer.getvalue()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Unable to download item %s for recognition", item_id)
+            raise HTTPException(status_code=502, detail="Не удалось скачать файл из Telegram") from exc
+        finally:
+            if temporary_bot is not None:
+                await temporary_bot.session.close()
+        if len(content) > app_settings.recognition_max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Для распознавания файл должен быть меньше "
+                    f"{app_settings.recognition_max_bytes // 1_000_000} МБ"
+                ),
+            )
+        try:
+            filename = item["file_name"] or f"telegram-{item_id}{media_extension(mime_type, kind)}"
+            if kind == "photo" or mime_type.startswith("image/"):
+                recognized = await ai.recognize_image(content, mime_type)
+                recognition_kind = "ocr"
+            elif kind in {"audio", "voice", "video"} or mime_type.startswith(("audio/", "video/")):
+                recognized = await ai.transcribe_media(
+                    content,
+                    filename=filename,
+                    mime_type=mime_type,
+                )
+                recognition_kind = "transcript"
+            else:
+                recognized = ai.extract_document_text(
+                    content,
+                    filename=filename,
+                    mime_type=mime_type,
+                )
+                recognition_kind = "document"
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        original = await db.get_item(user.id, item_id)
+        searchable = "\n".join((original or {}).get(key, "") or "" for key in ("title", "text"))
+        embedding = await ai.embed(f"{searchable}\n{recognized}")
+        updated = await db.set_recognition(
+            user.id,
+            item_id,
+            recognized,
+            recognition_kind,
+            embedding=embedding,
+        )
+        return updated or original or {}
+
     @app.post("/api/items/{item_id}/summary")
     async def summarize(item_id: int, user: UserDependency) -> dict[str, object]:
         item = await db.get_item(user.id, item_id)
@@ -330,6 +466,23 @@ def create_app(
         if not await db.delete_item(user.id, item_id):
             raise HTTPException(status_code=404, detail="Item not found")
 
+    @app.delete("/api/account", status_code=204)
+    async def delete_account(payload: DeleteAccountRequest, user: UserDependency) -> None:
+        if payload.confirmation.strip().casefold() != "удалить":
+            raise HTTPException(status_code=422, detail="Для подтверждения введи слово УДАЛИТЬ")
+        charge_id = await db.latest_subscription_charge(user.id)
+        if charge_id and app.state.bot is not None:
+            try:
+                await app.state.bot.edit_user_star_subscription(
+                    user_id=user.id,
+                    telegram_payment_charge_id=charge_id,
+                    is_canceled=True,
+                )
+            except Exception:
+                logger.exception("Unable to cancel Stars subscription for deleted user %s", user.id)
+        if not await db.delete_user_data(user.id):
+            raise HTTPException(status_code=404, detail="Профиль уже удалён")
+
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -337,3 +490,15 @@ def create_app(
         return FileResponse(Path(WEB_DIR) / "index.html")
 
     return app
+
+
+def media_extension(mime_type: str, kind: str) -> str:
+    extensions = {
+        "audio/ogg": ".ogg",
+        "audio/mpeg": ".mp3",
+        "audio/mp4": ".m4a",
+        "video/mp4": ".mp4",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+    }
+    return extensions.get(mime_type, ".ogg" if kind == "voice" else ".bin")

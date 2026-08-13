@@ -66,6 +66,52 @@ class ItemPatch(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class SmartReminderRequest(BaseModel):
+    text: str = Field(min_length=2, max_length=160)
+    timezone_offset_minutes: int = Field(default=180, ge=-720, le=840)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def strip_reminder_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+BulkOperation = Literal[
+    "mark_read",
+    "mark_unread",
+    "favorite",
+    "unfavorite",
+    "move",
+    "remind",
+    "clear_reminder",
+    "delete",
+]
+
+
+class BulkItemsRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=100)
+    operation: BulkOperation
+    category: Category | None = None
+    reminder_text: str | None = Field(default=None, min_length=2, max_length=160)
+    timezone_offset_minutes: int = Field(default=180, ge=-720, le=840)
+
+    @field_validator("item_ids")
+    @classmethod
+    def unique_item_ids(cls, value: list[int]) -> list[int]:
+        if any(item_id < 1 for item_id in value):
+            raise ValueError("item_ids must be positive")
+        return list(dict.fromkeys(value))
+
+    @field_validator("reminder_text", mode="before")
+    @classmethod
+    def strip_bulk_reminder_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class DeleteAccountRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=20)
+
+
 class ItemView(BaseModel):
     id: int
     kind: str
@@ -81,6 +127,9 @@ class ItemView(BaseModel):
     favorite: bool
     read: bool
     summary: str | None
+    recognized_text: str | None = None
+    recognition_kind: str | None = None
+    recognized_at: str | None = None
     reminder_at: str | None
     created_at: str
     score: float | None = None

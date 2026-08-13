@@ -21,6 +21,9 @@ const state = {
   actionDrag: null,
   categories: [],
   aiEnabled: false,
+  selectionMode: false,
+  selectedIds: new Set(),
+  reminderTarget: null,
 };
 
 const elements = {
@@ -44,6 +47,19 @@ const elements = {
   categoryIconInput: document.querySelector("#categoryIconInput"),
   categoryNameInput: document.querySelector("#categoryNameInput"),
   categoryManagerList: document.querySelector("#categoryManagerList"),
+  selectModeButton: document.querySelector("#selectModeButton"),
+  bulkBar: document.querySelector("#bulkBar"),
+  bulkCount: document.querySelector("#bulkCount"),
+  selectAllButton: document.querySelector("#selectAllButton"),
+  cancelSelectionButton: document.querySelector("#cancelSelectionButton"),
+  smartReminderModal: document.querySelector("#smartReminderModal"),
+  smartReminderForm: document.querySelector("#smartReminderForm"),
+  smartReminderInput: document.querySelector("#smartReminderInput"),
+  bulkCategoryModal: document.querySelector("#bulkCategoryModal"),
+  bulkCategoryList: document.querySelector("#bulkCategoryList"),
+  privacyButton: document.querySelector("#privacyButton"),
+  privacyModal: document.querySelector("#privacyModal"),
+  deleteAccountButton: document.querySelector("#deleteAccountButton"),
 };
 
 function authHeaders() {
@@ -118,6 +134,19 @@ function bindEvents() {
   });
   elements.categoryCreateForm.addEventListener("submit", createCategory);
   elements.categoryManagerList.addEventListener("submit", renameCategory);
+  elements.selectModeButton.addEventListener("click", () => setSelectionMode(!state.selectionMode));
+  elements.selectAllButton.addEventListener("click", toggleSelectAll);
+  elements.cancelSelectionButton.addEventListener("click", () => setSelectionMode(false));
+  elements.bulkBar.addEventListener("click", handleBulkAction);
+  elements.smartReminderForm.addEventListener("submit", submitSmartReminder);
+  elements.bulkCategoryList.addEventListener("click", handleBulkCategory);
+  elements.privacyButton.addEventListener("click", () => openModal(elements.privacyModal));
+  elements.deleteAccountButton.addEventListener("click", deleteAccount);
+  document.addEventListener("click", (event) => {
+    const closer = event.target.closest("[data-close-modal]");
+    if (closer) closeModal(document.getElementById(closer.dataset.closeModal));
+    if (event.target.classList.contains("modal-backdrop")) closeModal(event.target);
+  });
   elements.filterRow.addEventListener("click", (event) => {
     const button = event.target.closest("[data-filter]");
     if (!button) return;
@@ -316,15 +345,19 @@ async function runSearch(query) {
 
 function renderItems() {
   state.itemsLoaded = true;
+  const visibleIds = new Set(state.items.map((item) => item.id));
+  state.selectedIds = new Set([...state.selectedIds].filter((itemId) => visibleIds.has(itemId)));
   if (!state.items.length) {
     elements.itemsList.innerHTML = `
       <div class="empty-state">
         <span class="empty-icon">⌁</span>
         Здесь пока пусто.<br />Перешли боту сообщение или измени фильтр.
       </div>`;
+    renderSelectionBar();
     return;
   }
   elements.itemsList.innerHTML = state.items.map((item) => renderItem(item)).join("");
+  renderSelectionBar();
 }
 
 function renderItem(item) {
@@ -344,13 +377,17 @@ function renderItem(item) {
   const summary = item.summary
     ? `<div class="item-summary"><b>Кратко</b><br>${escapeHtml(item.summary)}</div>`
     : "";
+  const recognized = item.recognized_text
+    ? `<details class="recognized-content"><summary>${item.recognition_kind === "transcript" ? "Расшифровка" : item.recognition_kind === "ocr" ? "Распознано на изображении" : "Текст документа"}</summary><p>${escapeHtml(item.recognized_text)}</p></details>`
+    : "";
   const source = item.source_chat || item.source_author;
   const reminder = item.reminder_at
     ? `<span class="meta-dot"></span><span class="reminder-label">⏰ ${formatDate(item.reminder_at)}</span>`
     : "";
   const media = item.has_media ? renderMediaLauncher(item) : "";
   return `
-    <article class="item-card ${item.read ? "read" : ""}" data-item-id="${item.id}">
+    <article class="item-card ${item.read ? "read" : ""} ${state.selectionMode ? "selection-mode" : ""} ${state.selectedIds.has(item.id) ? "selected" : ""}" data-item-id="${item.id}">
+      ${state.selectionMode ? `<button class="selection-toggle" data-action="select" aria-label="${state.selectedIds.has(item.id) ? "Убрать из выбранного" : "Выбрать карточку"}">${state.selectedIds.has(item.id) ? "✓" : ""}</button>` : ""}
       <div class="item-top">
         <button class="category-chip" data-action="category" aria-expanded="false">
           ${escapeHtml(categoryName(item.category))} <span aria-hidden="true">⌄</span>
@@ -363,6 +400,7 @@ function renderItem(item) {
       ${media}
       ${excerpt}
       ${summary}
+      ${recognized}
       <div class="item-meta">
         <span>${formatDate(item.created_at)}</span>
         ${source ? `<span class="meta-dot"></span><span>${escapeHtml(source)}</span>` : ""}
@@ -372,10 +410,12 @@ function renderItem(item) {
         <button class="action-button" data-action="read">${item.read ? "↩ Не прочитано" : "✓ Прочитано"}</button>
         <button class="action-button" data-action="tomorrow">⏰ Завтра</button>
         <button class="action-button" data-action="month">Через месяц</button>
+        <button class="action-button" data-action="smart-reminder">Когда угодно…</button>
         ${item.reminder_at ? '<button class="action-button reminder-cancel" data-action="cancel-reminder">🔕 Отменить</button>' : ""}
         <button class="action-button" data-action="category">📂 Категория</button>
         ${item.kind === "video" ? '<button class="action-button" data-action="edit-title">✎ Тема</button>' : ""}
         <button class="action-button" data-action="summary">${state.aiEnabled ? "✨ AI-кратко" : "✨ Кратко"}</button>
+        ${item.has_media ? `<button class="action-button" data-action="recognize">${recognitionLabel(item)}</button>` : ""}
         <button class="action-button danger" data-action="delete">Удалить</button>
       </div>
     </article>`;
@@ -435,6 +475,162 @@ function renderMediaLauncher(item) {
     </div>`;
 }
 
+function recognitionLabel(item) {
+  if (item.recognized_text) return "↻ Распознать заново";
+  if (item.kind === "photo") return "▧ Распознать текст";
+  if (["audio", "voice", "video"].includes(item.kind)) return "◉ Расшифровать";
+  return "▤ Извлечь текст";
+}
+
+function setSelectionMode(enabled) {
+  state.selectionMode = enabled;
+  state.selectedIds.clear();
+  elements.selectModeButton.classList.toggle("active", enabled);
+  elements.selectModeButton.textContent = enabled ? "Готово" : "Выбрать";
+  renderItems();
+}
+
+function toggleItemSelection(itemId) {
+  if (state.selectedIds.has(itemId)) state.selectedIds.delete(itemId);
+  else state.selectedIds.add(itemId);
+  renderItems();
+  tg?.HapticFeedback?.selectionChanged?.();
+}
+
+function toggleSelectAll() {
+  const visibleIds = state.items.map((item) => item.id);
+  const allSelected = visibleIds.length && visibleIds.every((id) => state.selectedIds.has(id));
+  state.selectedIds = new Set(allSelected ? [] : visibleIds);
+  renderItems();
+}
+
+function renderSelectionBar() {
+  elements.bulkBar.hidden = !state.selectionMode;
+  elements.bulkCount.textContent = state.selectedIds.size;
+  const allSelected = state.items.length && state.items.every((item) => state.selectedIds.has(item.id));
+  elements.selectAllButton.textContent = allSelected ? "Снять все" : "Выбрать все";
+  elements.bulkBar.querySelectorAll("[data-bulk-action]").forEach((button) => {
+    button.disabled = state.selectedIds.size === 0;
+  });
+}
+
+async function handleBulkAction(event) {
+  const button = event.target.closest("[data-bulk-action]");
+  if (!button || !state.selectedIds.size) return;
+  const operation = button.dataset.bulkAction;
+  if (operation === "move") {
+    elements.bulkCategoryList.innerHTML = state.categories.map((category) => `
+      <button type="button" data-bulk-category="${escapeAttribute(category.id)}">
+        <span>${escapeHtml(category.icon)}</span>${escapeHtml(category.name)}
+      </button>`).join("");
+    openModal(elements.bulkCategoryModal);
+    return;
+  }
+  if (operation === "remind") {
+    state.reminderTarget = { kind: "bulk" };
+    openSmartReminder();
+    return;
+  }
+  if (operation === "delete") {
+    const confirmed = await askConfirm(`Удалить выбранные сохранения (${state.selectedIds.size})?`);
+    if (!confirmed) return;
+  }
+  await runBulkOperation(operation);
+}
+
+async function runBulkOperation(operation, extra = {}) {
+  const ids = [...state.selectedIds];
+  try {
+    const result = await api("/api/bulk/items", {
+      method: "POST",
+      body: JSON.stringify({ item_ids: ids, operation, ...extra }),
+    });
+    showToast(`Обновлено сохранений: ${result.affected}`);
+    setSelectionMode(false);
+    await Promise.all([loadStats(), state.query ? runSearch(state.query) : loadItems()]);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function handleBulkCategory(event) {
+  const button = event.target.closest("[data-bulk-category]");
+  if (!button) return;
+  closeModal(elements.bulkCategoryModal);
+  await runBulkOperation("move", { category: button.dataset.bulkCategory });
+}
+
+function openSmartReminder() {
+  elements.smartReminderInput.value = "";
+  openModal(elements.smartReminderModal);
+  setTimeout(() => elements.smartReminderInput.focus(), 80);
+}
+
+async function submitSmartReminder(event) {
+  event.preventDefault();
+  const text = elements.smartReminderInput.value.trim();
+  if (!text || !state.reminderTarget) return;
+  const submit = event.submitter;
+  try {
+    submit.disabled = true;
+    const timezoneOffset = -new Date().getTimezoneOffset();
+    if (state.reminderTarget.kind === "bulk") {
+      closeModal(elements.smartReminderModal);
+      await runBulkOperation("remind", {
+        reminder_text: text,
+        timezone_offset_minutes: timezoneOffset,
+      });
+    } else {
+      const updated = await api(`/api/items/${state.reminderTarget.itemId}/reminder`, {
+        method: "POST",
+        body: JSON.stringify({ text, timezone_offset_minutes: timezoneOffset }),
+      });
+      replaceItem(updated);
+      closeModal(elements.smartReminderModal);
+      showToast(`Напомню ${formatReminderDate(updated.reminder_at)}`);
+    }
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function openModal(modal) {
+  modal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeModal(modal) {
+  if (!modal) return;
+  modal.hidden = true;
+  if (!document.querySelector(".modal-backdrop:not([hidden])")) document.body.classList.remove("modal-open");
+}
+
+async function deleteAccount() {
+  const first = await askConfirm("Удалить профиль и ВСЕ сохранения? Это нельзя отменить.");
+  if (!first) return;
+  const confirmation = window.prompt("Для окончательного подтверждения введи слово УДАЛИТЬ");
+  if (!confirmation) return;
+  try {
+    elements.deleteAccountButton.disabled = true;
+    await api("/api/account", {
+      method: "DELETE",
+      body: JSON.stringify({ confirmation }),
+    });
+    closeModal(elements.privacyModal);
+    state.items = [];
+    state.categories = [];
+    renderItems();
+    showToast("Все данные удалены");
+    tg?.close?.();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    elements.deleteAccountButton.disabled = false;
+  }
+}
+
 async function handleItemAction(event) {
   const actions = event.target.closest(".item-actions");
   if (actions?.dataset.suppressClick === "true") {
@@ -444,15 +640,25 @@ async function handleItemAction(event) {
   }
   const button = event.target.closest("[data-action]");
   const card = event.target.closest("[data-item-id]");
-  if (!button || !card) return;
+  if (!card) return;
   const itemId = Number(card.dataset.itemId);
   const item = state.items.find((candidate) => candidate.id === itemId);
   if (!item) return;
+  if (state.selectionMode && !button) {
+    event.preventDefault();
+    toggleItemSelection(itemId);
+    return;
+  }
+  if (!button) return;
   const action = button.dataset.action;
 
   try {
     button.disabled = true;
-    if (action === "favorite") {
+    if (action === "select") {
+      toggleItemSelection(itemId);
+    } else if (state.selectionMode) {
+      toggleItemSelection(itemId);
+    } else if (action === "favorite") {
       await updateItem(itemId, { favorite: !item.favorite }, "Избранное обновлено");
     } else if (action === "read") {
       await updateItem(itemId, { read: !item.read }, "Статус обновлён");
@@ -462,6 +668,9 @@ async function handleItemAction(event) {
       await updateItem(itemId, { reminder_at: date.toISOString() }, "Напоминание поставлено");
     } else if (action === "cancel-reminder") {
       await updateItem(itemId, { clear_reminder: true }, "Напоминание отменено");
+    } else if (action === "smart-reminder") {
+      state.reminderTarget = { kind: "item", itemId };
+      openSmartReminder();
     } else if (action === "category") {
       const picker = card.querySelector("[data-category-picker]");
       if (picker) {
@@ -492,6 +701,11 @@ async function handleItemAction(event) {
       const updated = await api(`/api/items/${itemId}/summary`, { method: "POST" });
       replaceItem(updated);
       showToast("Суммаризация готова");
+    } else if (action === "recognize") {
+      showToast("Распознаю содержимое…");
+      const updated = await api(`/api/items/${itemId}/recognize`, { method: "POST" });
+      replaceItem(updated);
+      showToast("Содержимое распознано и добавлено в поиск");
     } else if (action === "media") {
       await openMedia(item, card);
     } else if (action === "delete") {
@@ -809,6 +1023,15 @@ function formatDate(value) {
     month: "short",
     ...(sameYear ? {} : { year: "numeric" }),
   }).format(date).replace(" г.", "");
+}
+
+function formatReminderDate(value) {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function escapeHtml(value) {

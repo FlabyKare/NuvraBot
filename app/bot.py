@@ -10,6 +10,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -28,10 +30,15 @@ from .classifier import classify, first_url, make_title
 from .config import Settings
 from .database import Database
 from .models import ItemPatch, NewItem, TelegramUser
+from .reminders import parse_smart_reminder
 
 logger = logging.getLogger(__name__)
 
 CATEGORY_LABELS = DEFAULT_CATEGORY_LABELS
+
+
+class ReminderForm(StatesGroup):
+    waiting_for_time = State()
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -209,7 +216,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         await wait_message.edit_text("\n".join(lines), disable_web_page_preview=True)
 
     @router.callback_query(F.data.startswith("item:"))
-    async def item_action(callback: CallbackQuery) -> None:
+    async def item_action(callback: CallbackQuery, state: FSMContext) -> None:
         if not callback.from_user or not callback.data:
             return
         try:
@@ -243,6 +250,19 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         elif action == "cancel":
             item = await database.patch_item(user_id, item_id, ItemPatch(clear_reminder=True))
             notice = "Напоминание отменено"
+        elif action == "smart":
+            await state.set_state(ReminderForm.waiting_for_time)
+            await state.update_data(item_id=item_id)
+            await callback.answer()
+            if callback.message:
+                await callback.message.answer(
+                    "⏰ <b>Когда напомнить?</b>\n\n"
+                    "Напиши обычной фразой, например:\n"
+                    "• завтра в 19:00\n"
+                    "• через две недели\n"
+                    "• в пятницу вечером"
+                )
+            return
         elif action == "category":
             await callback.answer("Выбери категорию")
             if callback.message:
@@ -272,6 +292,34 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
                 await callback.message.edit_reply_markup(reply_markup=item_keyboard(item, categories))
             except Exception:
                 logger.debug("Unable to refresh inline keyboard", exc_info=True)
+
+    @router.message(ReminderForm.waiting_for_time)
+    async def receive_smart_reminder(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not message.text:
+            await message.answer("Напиши дату и время текстом или отправь /cancel")
+            return
+        if message.text.strip().casefold() == "/cancel":
+            await state.clear()
+            await message.answer("Настройка напоминания отменена")
+            return
+        data = await state.get_data()
+        item_id = int(data.get("item_id", 0))
+        try:
+            reminder_at = parse_smart_reminder(message.text, timezone_offset_minutes=180)
+        except ValueError as exc:
+            await message.answer(f"Не получилось: {html.escape(str(exc))}")
+            return
+        item = await database.patch_item(
+            message.from_user.id,
+            item_id,
+            ItemPatch(reminder_at=reminder_at),
+        )
+        await state.clear()
+        if not item:
+            await message.answer("Сохранение больше не найдено")
+            return
+        local_time = reminder_at.astimezone().strftime("%d.%m.%Y в %H:%M")
+        await message.answer(f"⏰ Готово, напомню {local_time}")
 
     @router.callback_query(F.data.startswith("itemcat:"))
     async def choose_item_category(callback: CallbackQuery) -> None:
@@ -329,6 +377,12 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
             reply_markup=item_keyboard(saved, categories),
             disable_web_page_preview=True,
         )
+        recognizable_kinds = {"photo", "audio", "voice", "video", "file"}
+        if ai.enabled and saved["has_media"] and saved["kind"] in recognizable_kinds:
+            await message.answer(
+                "🔎 Хочешь извлечь текст или расшифровать содержимое? Открой Mini App и нажми "
+                "«Распознать» на карточке."
+            )
 
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
@@ -469,6 +523,7 @@ def item_keyboard(
                 InlineKeyboardButton(text="⏰ Завтра", callback_data=f"item:tomorrow:{item_id}"),
                 InlineKeyboardButton(text="🗓 Через месяц", callback_data=f"item:month:{item_id}"),
             ],
+            [InlineKeyboardButton(text="🗣 Когда угодно…", callback_data=f"item:smart:{item_id}")],
         ]
     if item.get("reminder_at"):
         rows.append(

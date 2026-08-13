@@ -85,8 +85,38 @@ async def test_item_lifecycle_and_stats(database: Database) -> None:
     updated = await database.patch_item(101, saved["id"], ItemPatch(clear_reminder=True))
     assert updated and updated["reminder_at"] is None
 
+    recognized = await database.set_recognition(
+        101,
+        video["id"],
+        "В видео рассказывают про настройку сервера WireGuard",
+        "transcript",
+    )
+    assert recognized and recognized["recognized_text"].startswith("В видео")
+    recognized_search = await database.search_fts(101, "сервер WireGuard")
+    assert video["id"] in {item["id"] for item in recognized_search}
+
+    affected = await database.bulk_patch_items(
+        101,
+        [video["id"], legacy_video["id"]],
+        favorite=True,
+        read=True,
+    )
+    assert affected == 2
+    assert all(item["favorite"] and item["read"] for item in await database.list_items(101))
+
     assert await database.delete_item(101, saved["id"]) is True
     assert (await database.stats(101))["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_user_data_is_scoped_and_cascades(database: Database) -> None:
+    await database.create_item(501, NewItem(title="Удалить меня"))
+    await database.create_category(501, "Личное")
+    await database.create_item(502, NewItem(title="Оставить меня"))
+
+    assert await database.delete_user_data(501) is True
+    assert await database.get_user(501) is None
+    assert (await database.stats(502))["total"] == 1
 
 
 @pytest.mark.asyncio

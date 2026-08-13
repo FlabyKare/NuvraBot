@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
+from pypdf import PdfReader
 
 from .config import Settings
 from .database import Database
@@ -58,6 +62,97 @@ class AIService:
         sentences = SENTENCE_RE.split(cleaned)
         excerpt = " ".join(sentences[:3])
         return (excerpt[:697] + "…") if len(excerpt) > 700 else excerpt
+
+    async def recognize_image(self, content: bytes, mime_type: str = "image/jpeg") -> str:
+        if not self.client:
+            raise RuntimeError("Для OCR нужен работающий OpenAI API")
+        if not content:
+            raise ValueError("Изображение пустое")
+        encoded = base64.b64encode(content).decode("ascii")
+        try:
+            response = await self.client.responses.create(
+                model=self.settings.openai_text_model,
+                instructions=(
+                    "Распознай содержимое изображения для личной базы знаний. Сначала дословно "
+                    "перепиши весь читаемый текст, затем кратко опиши важные объекты и контекст. "
+                    "Отвечай по-русски, без вводных фраз. Не выдумывай нечитаемые детали."
+                ),
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Извлеки текст и смысл изображения."},
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:{mime_type};base64,{encoded}",
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+            )
+        except Exception as exc:
+            logger.exception("Unable to recognize image")
+            raise RuntimeError("OpenAI не смог распознать изображение. Проверь баланс API") from exc
+        result = response.output_text.strip()
+        if not result:
+            raise RuntimeError("На изображении не удалось распознать содержимое")
+        return result
+
+    async def transcribe_media(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        mime_type: str | None = None,
+    ) -> str:
+        if not self.client:
+            raise RuntimeError("Для расшифровки нужен работающий OpenAI API")
+        if not content:
+            raise ValueError("Медиафайл пустой")
+        try:
+            response = await self.client.audio.transcriptions.create(
+                model=self.settings.openai_transcription_model,
+                file=(filename, content, mime_type or "application/octet-stream"),
+                response_format="text",
+            )
+        except Exception as exc:
+            logger.exception("Unable to transcribe media")
+            raise RuntimeError("OpenAI не смог расшифровать файл. Проверь формат и баланс API") from exc
+        result = response if isinstance(response, str) else getattr(response, "text", "")
+        if not result.strip():
+            raise RuntimeError("В записи не удалось распознать речь")
+        return result.strip()
+
+    def extract_document_text(
+        self,
+        content: bytes,
+        *,
+        filename: str | None,
+        mime_type: str | None,
+    ) -> str:
+        suffix = Path(filename or "").suffix.casefold()
+        if mime_type == "application/pdf" or suffix == ".pdf":
+            try:
+                pages = [page.extract_text() or "" for page in PdfReader(io.BytesIO(content)).pages]
+            except Exception as exc:
+                raise ValueError("Не удалось прочитать PDF") from exc
+            result = "\n\n".join(page.strip() for page in pages if page.strip())
+            if not result:
+                raise ValueError("В PDF нет текстового слоя — отправь страницы как изображения для OCR")
+            return result[:100_000]
+        text_suffixes = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".py", ".js", ".ts"}
+        if (mime_type or "").startswith("text/") or suffix in text_suffixes:
+            for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+                try:
+                    return content.decode(encoding)[:100_000].strip()
+                except UnicodeDecodeError:
+                    continue
+            raise ValueError("Не удалось определить кодировку текстового файла")
+        raise ValueError(
+            "Этот формат пока нельзя распознать. "
+            "Поддерживаются изображения, PDF, текст, аудио и видео"
+        )
 
     async def search(
         self,

@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_text_model: str = "gpt-5.4-nano"
+    openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    recognition_max_bytes: int = Field(default=20_000_000, ge=100_000, le=25_000_000)
 
     free_items_limit: int = Field(default=500, ge=1)
     pro_price_stars: int = Field(default=299, ge=1, le=10_000)
