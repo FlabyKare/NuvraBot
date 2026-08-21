@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     terms_url: str = "https://example.com/terms"
     reminder_poll_seconds: int = Field(default=30, ge=5)
     search_candidate_limit: int = Field(default=500, ge=20, le=5000)
+    media_context_window_seconds: int = Field(default=600, ge=30, le=3600)
 
     @field_validator("public_url")
     @classmethod

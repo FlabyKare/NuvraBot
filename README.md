@@ -185,6 +185,7 @@ TERMS_URL=https://ваш-домен.example/terms
 | `REMINDER_POLL_SECONDS` | `30` | частота проверки напоминаний |
 | `OPENAI_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | модель распознавания речи |
 | `RECOGNITION_MAX_BYTES` | `20000000` | максимальный размер вложения для распознавания |
+| `MEDIA_CONTEXT_WINDOW_SECONDS` | `600` | сколько секунд ждать отдельное описание после медиа без подписи |
 | `OPENAI_API_KEY` | пусто | включает AI-возможности |
 
 ## Проверки

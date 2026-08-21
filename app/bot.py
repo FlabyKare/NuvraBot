@@ -91,6 +91,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         await message.answer(
             "<b>Как пользоваться</b>\n\n"
             "1. Перешли сюда любое сообщение или файл.\n"
+            "   Если у медиа нет подписи, пришли описание следующим сообщением — я объединю их.\n"
             "2. Выбери категорию, нажми ⭐, ✅ или поставь напоминание.\n"
             "3. Используй <code>/search запрос</code> или открой Mini App.\n\n"
             "AI-функции включаются автоматически, если на сервере задан OPENAI_API_KEY."
@@ -356,6 +357,51 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
         if not message.from_user:
             return
         user_id = await remember_user(database, message)
+        new_item = extract_item(message)
+
+        if is_context_text_message(message):
+            pending = await database.get_pending_media_context(user_id)
+            if pending:
+                context_title = make_title(new_item.text, url=new_item.url)
+                context_url = pending["url"] or new_item.url
+                searchable = "\n".join(
+                    part
+                    for part in (
+                        context_title,
+                        new_item.text,
+                        context_url or "",
+                        pending.get("file_name") or "",
+                        pending.get("source_chat") or "",
+                        pending.get("recognized_text") or "",
+                    )
+                    if part
+                )
+                embedding = await ai.embed(searchable)
+                attached = await database.attach_pending_media_context(
+                    user_id,
+                    pending["id"],
+                    title=context_title,
+                    text=new_item.text,
+                    url=new_item.url,
+                    embedding=embedding,
+                )
+                if attached:
+                    categories = await database.list_categories(user_id)
+                    media_label = {
+                        "video": "видео",
+                        "audio": "аудио",
+                        "voice": "голосовому сообщению",
+                        "photo": "изображению",
+                        "file": "файлу",
+                    }.get(attached["kind"], "медиа")
+                    await message.answer(
+                        f"<b>Описание добавлено к {media_label}</b>\n"
+                        f"{html.escape(attached['title'])}",
+                        reply_markup=item_keyboard(attached, categories),
+                        disable_web_page_preview=True,
+                    )
+                    return
+
         user = await database.get_user(user_id)
         counters = await database.stats(user_id)
         if not (user and user["is_pro"]) and counters["total"] >= settings.free_items_limit:
@@ -365,15 +411,30 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
             )
             return
 
-        new_item = extract_item(message)
         embedding = await ai.embed(new_item.searchable_text)
         saved = await database.create_item(user_id, new_item, embedding=embedding)
+        awaiting_context = bool(saved["has_media"] and not new_item.text)
+        if awaiting_context:
+            await database.set_pending_media_context(
+                user_id,
+                saved["id"],
+                datetime.now(UTC) + timedelta(seconds=settings.media_context_window_seconds),
+            )
+        else:
+            await database.clear_pending_media_context(user_id)
         categories = await database.list_categories(user_id)
         labels = {row["id"]: row["label"] for row in categories}
         category = labels.get(saved["category"], "🧠 Без категории")
         title_line = "" if saved["kind"] == "video" else f"\n{html.escape(saved['title'])}"
         await message.answer(
-            f"<b>Сохранено</b> · {html.escape(category)}{title_line}",
+            f"<b>Сохранено</b> · {html.escape(category)}{title_line}"
+            + (
+                "\n\nПришли описание следующим сообщением в течение "
+                f"{max(1, settings.media_context_window_seconds // 60)} мин. — "
+                "я добавлю его к этой карточке."
+                if awaiting_context
+                else ""
+            ),
             reply_markup=item_keyboard(saved, categories),
             disable_web_page_preview=True,
         )
@@ -469,6 +530,15 @@ def extract_item(message: Message) -> NewItem:
         source_author=source_author,
         source_message_id=source_message_id,
         raw_json=message.model_dump_json(exclude_none=True),
+    )
+
+
+def is_context_text_message(message: Message) -> bool:
+    text = (message.text or "").strip()
+    return bool(
+        text
+        and not text.startswith("/")
+        and not any((message.document, message.video, message.audio, message.voice, message.photo))
     )
 
 

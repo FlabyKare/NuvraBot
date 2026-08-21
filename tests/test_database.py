@@ -197,3 +197,75 @@ async def test_legacy_video_title_is_migrated_from_caption_once(tmp_path) -> Non
     reopened = await reopened_database.get_item(404, video["id"])
     assert reopened and reopened["title"] == "Моё название"
     await reopened_database.close()
+
+
+@pytest.mark.asyncio
+async def test_next_text_is_attached_to_pending_media(database: Database) -> None:
+    video = await database.create_item(
+        606,
+        NewItem(
+            kind="video",
+            category="watch",
+            title="Видео",
+            telegram_file_id="context-video-id",
+            file_name="clip.mp4",
+            mime_type="video/mp4",
+        ),
+    )
+    assert await database.set_pending_media_context(
+        606,
+        video["id"],
+        datetime.now(UTC) + timedelta(minutes=10),
+    )
+    pending = await database.get_pending_media_context(606)
+    assert pending and pending["id"] == video["id"]
+
+    attached = await database.attach_pending_media_context(
+        606,
+        video["id"],
+        title="Тактика выхода на точку B",
+        text="Тактика выхода на точку B на карте Mirage",
+        url="https://example.com/tactics",
+        embedding=[0.1, 0.2],
+    )
+
+    assert attached and attached["title"] == "Тактика выхода на точку B"
+    assert attached["text"] == "Тактика выхода на точку B на карте Mirage"
+    assert attached["url"] == "https://example.com/tactics"
+    assert await database.get_pending_media_context(606) is None
+    assert await database.attach_pending_media_context(
+        606,
+        video["id"],
+        title="Второй текст",
+        text="Не должен перезаписать видео",
+    ) is None
+    found = await database.search_fts(606, "тактика Mirage")
+    assert [item["id"] for item in found] == [video["id"]]
+
+
+@pytest.mark.asyncio
+async def test_expired_media_context_is_not_attached(database: Database) -> None:
+    video = await database.create_item(
+        607,
+        NewItem(
+            kind="video",
+            category="watch",
+            title="Видео",
+            telegram_file_id="expired-video-id",
+        ),
+    )
+    await database.set_pending_media_context(
+        607,
+        video["id"],
+        datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    assert await database.get_pending_media_context(607) is None
+    assert await database.attach_pending_media_context(
+        607,
+        video["id"],
+        title="Позднее описание",
+        text="Этот текст должен стать отдельной карточкой",
+    ) is None
+    unchanged = await database.get_item(607, video["id"])
+    assert unchanged and unchanged["text"] == ""

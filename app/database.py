@@ -153,6 +153,13 @@ class Database:
                 UNIQUE(user_id, name)
             );
 
+            CREATE TABLE IF NOT EXISTS pending_media_context (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 migration_key TEXT PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -585,6 +592,120 @@ class Database:
             (telegram_id, item_id),
         )
         return dict(row) if row else None
+
+    async def set_pending_media_context(
+        self,
+        telegram_id: int,
+        item_id: int,
+        expires_at: datetime,
+    ) -> bool:
+        now = to_iso()
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO pending_media_context(user_id, item_id, expires_at, created_at)
+                SELECT users.id, items.id, ?, ?
+                FROM users JOIN items ON items.user_id = users.id
+                WHERE users.telegram_id = ? AND items.id = ?
+                  AND items.telegram_file_id IS NOT NULL
+                ON CONFLICT(user_id) DO UPDATE SET
+                    item_id = excluded.item_id,
+                    expires_at = excluded.expires_at,
+                    created_at = excluded.created_at
+                """,
+                (to_iso(expires_at), now, telegram_id, item_id),
+            )
+            await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def clear_pending_media_context(self, telegram_id: int) -> None:
+        async with self._write_lock:
+            await self.conn.execute(
+                """
+                DELETE FROM pending_media_context
+                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                """,
+                (telegram_id,),
+            )
+            await self.conn.commit()
+
+    async def get_pending_media_context(self, telegram_id: int) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            """
+            SELECT items.* FROM pending_media_context
+            JOIN users ON users.id = pending_media_context.user_id
+            JOIN items ON items.id = pending_media_context.item_id
+            WHERE users.telegram_id = ? AND pending_media_context.expires_at >= ?
+            """,
+            (telegram_id, to_iso()),
+        )
+        return self._public_item(row) if row else None
+
+    async def attach_pending_media_context(
+        self,
+        telegram_id: int,
+        item_id: int,
+        *,
+        title: str,
+        text: str,
+        url: str | None = None,
+        embedding: list[float] | None = None,
+    ) -> dict[str, Any] | None:
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        now = to_iso()
+        async with self._write_lock:
+            pending = await (
+                await self.conn.execute(
+                    """
+                    SELECT pending_media_context.item_id
+                    FROM pending_media_context
+                    JOIN users ON users.id = pending_media_context.user_id
+                    WHERE users.telegram_id = ?
+                      AND pending_media_context.item_id = ?
+                      AND pending_media_context.expires_at >= ?
+                    """,
+                    (telegram_id, item_id, now),
+                )
+            ).fetchone()
+            if not pending:
+                return None
+            await self.conn.execute(
+                """
+                UPDATE items SET
+                    title = ?,
+                    text = CASE
+                        WHEN TRIM(text) = '' THEN ?
+                        ELSE text || CHAR(10) || CHAR(10) || ?
+                    END,
+                    url = COALESCE(url, ?),
+                    embedding = ?,
+                    summary = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                  AND user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                """,
+                (
+                    title,
+                    cleaned,
+                    cleaned,
+                    url,
+                    json.dumps(embedding) if embedding else None,
+                    now,
+                    item_id,
+                    telegram_id,
+                ),
+            )
+            await self.conn.execute(
+                """
+                DELETE FROM pending_media_context
+                WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)
+                """,
+                (telegram_id,),
+            )
+            await self.conn.commit()
+        return await self.get_item(telegram_id, item_id)
 
     async def list_items(
         self,

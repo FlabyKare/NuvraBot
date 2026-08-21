@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
-from app.bot import category_keyboard, item_keyboard
+from app.bot import category_keyboard, is_context_text_message, item_keyboard
 
 
 def test_item_keyboard_offers_category_and_active_reminder_cancel() -> None:
@@ -50,3 +51,19 @@ def test_category_keyboard_supports_custom_category_names() -> None:
 
     assert any(button.callback_data == "itemcat:c_123:9" for button in buttons)
     assert any(button.text == "✓ ✈️ Путешествия" for button in buttons)
+
+
+def test_plain_text_can_be_media_context_but_commands_and_media_cannot() -> None:
+    def message(text: str | None, **media):
+        return SimpleNamespace(
+            text=text,
+            document=media.get("document"),
+            video=media.get("video"),
+            audio=media.get("audio"),
+            voice=media.get("voice"),
+            photo=media.get("photo"),
+        )
+
+    assert is_context_text_message(message("Описание видео")) is True
+    assert is_context_text_message(message("/search видео")) is False
+    assert is_context_text_message(message("Подпись", photo=[object()])) is False
