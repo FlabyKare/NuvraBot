@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -41,6 +43,23 @@ class ReminderForm(StatesGroup):
     waiting_for_time = State()
 
 
+class UserMessageSequencer:
+    """Process saved messages from one user in the same order Telegram delivered them."""
+
+    def __init__(self) -> None:
+        self._locks: dict[int, asyncio.Lock] = {}
+
+    @asynccontextmanager
+    async def hold(self, user_id: int) -> AsyncIterator[None]:
+        lock = self._locks.setdefault(user_id, asyncio.Lock())
+        try:
+            async with lock:
+                yield
+        finally:
+            if not lock.locked():
+                self._locks.pop(user_id, None)
+
+
 def create_bot(settings: Settings) -> Bot:
     return Bot(
         token=settings.telegram_bot_token,
@@ -72,6 +91,7 @@ async def configure_bot(bot: Bot, settings: Settings) -> None:
 
 def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> Dispatcher:
     router = Router(name="second-brain")
+    message_sequencer = UserMessageSequencer()
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
@@ -352,8 +372,7 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
             except Exception:
                 logger.debug("Unable to refresh category keyboard", exc_info=True)
 
-    @router.message()
-    async def save_message(message: Message) -> None:
+    async def process_saved_message(message: Message) -> None:
         if not message.from_user:
             return
         user_id = await remember_user(database, message)
@@ -444,6 +463,13 @@ def create_dispatcher(settings: Settings, database: Database, ai: AIService) -> 
                 "🔎 Хочешь извлечь текст или расшифровать содержимое? Открой Mini App и нажми "
                 "«Распознать» на карточке."
             )
+
+    @router.message()
+    async def save_message(message: Message) -> None:
+        if not message.from_user:
+            return
+        async with message_sequencer.hold(message.from_user.id):
+            await process_saved_message(message)
 
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
